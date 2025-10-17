@@ -1,0 +1,30 @@
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+.env
+.env.*
+!.env.example
+
+# Deployment artifacts
+*.zip
+*.tar.gz
+deployment-info.json
+.last-deployment-*.json
