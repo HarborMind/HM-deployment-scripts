@@ -235,17 +235,25 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
-        # Phase 2: Lambda and Operations
-        echo -e "${BLUE}Phase 2: Lambda Functions and Operations${NC}"
-        if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+        # Phase 2: Lambda Functions (must deploy first to export search function role to SSM)
+        echo -e "${BLUE}Phase 2: Lambda Functions${NC}"
+        echo -e "${YELLOW}Note: Lambda Functions stack must deploy before Analytics for SSM parameter dependencies${NC}"
+        if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
-            # Phase 3: Remaining stacks
-            echo -e "${BLUE}Phase 3: API Gateway and remaining stacks${NC}"
-            if ! cdk deploy --all --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            # Phase 3: Analytics and Operations (Analytics imports search function role from SSM)
+            echo -e "${BLUE}Phase 3: Analytics and Operations${NC}"
+            if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
+            else
+                # Phase 4: Remaining stacks (API Gateway, etc.)
+                echo -e "${BLUE}Phase 4: API Gateway and remaining stacks${NC}"
+                if ! cdk deploy --all --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    echo -e "${RED}❌ Phase 4 deployment failed${NC}"
+                    DEPLOYMENT_SUCCESS=false
+                fi
             fi
         fi
     fi
