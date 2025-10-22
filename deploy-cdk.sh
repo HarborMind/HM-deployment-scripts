@@ -244,13 +244,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         else
             # Phase 3: Analytics and Operations (Analytics imports search function role from SSM)
             echo -e "${BLUE}Phase 3: Analytics and Operations${NC}"
+            echo -e "${YELLOW}Note: Operations stack must deploy before API Gateway (catalog function SSM dependency)${NC}"
             if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
-                # Phase 4: Remaining stacks (API Gateway, etc.)
-                echo -e "${BLUE}Phase 4: API Gateway and remaining stacks${NC}"
-                if ! cdk deploy --all --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                # Phase 4: API Gateway and remaining stacks (API Gateway depends on Operations catalog functions)
+                echo -e "${BLUE}Phase 4: API Gateway, Security, and Frontend stacks${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway HarborMind-${ENVIRONMENT}-SecurityInfrastructure HarborMind-${ENVIRONMENT}-SecurityAuth HarborMind-${ENVIRONMENT}-Frontend --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 4 deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 fi
