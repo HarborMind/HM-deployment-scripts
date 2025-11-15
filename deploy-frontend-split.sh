@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # Enhanced Frontend Deployment Script for HarborMind - Split Frontend Structure
-# Automatically gathers all configuration from deployed stacks
+# Automatically gathers configuration from AWS resources (Cognito, S3, CloudFront)
+# Falls back to CloudFormation stack outputs if direct queries fail
 #
 # Usage:
 #   ./deploy-frontend-split.sh [environment] [deploy_type]
@@ -132,20 +133,56 @@ get_stack_output() {
         --region ${AWS_REGION} 2>/dev/null || echo ""
 }
 
+# Function to get User Pool ID by name
+get_user_pool_id_by_name() {
+    local pool_name=$1
+
+    if [ -z "$pool_name" ]; then
+        echo ""
+        return
+    fi
+
+    # List all user pools and find the one matching the name
+    aws cognito-idp list-user-pools \
+        --max-results 60 \
+        --query "UserPools[?Name=='$pool_name'].Id" \
+        --output text \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} 2>/dev/null || echo ""
+}
+
 # Function to get Cognito User Pool Client ID from User Pool ID
 get_cognito_client_id() {
     local user_pool_id=$1
     local client_name_pattern=${2:-"admin-client"}
-    
+
     if [ -z "$user_pool_id" ]; then
         echo ""
         return
     fi
-    
+
     # List all clients for the user pool and find the first one (or one matching pattern)
     aws cognito-idp list-user-pool-clients \
         --user-pool-id "$user_pool_id" \
         --query "UserPoolClients[0].ClientId" \
+        --output text \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} 2>/dev/null || echo ""
+}
+
+# Function to get Cognito domain for a user pool
+get_cognito_domain() {
+    local user_pool_id=$1
+
+    if [ -z "$user_pool_id" ]; then
+        echo ""
+        return
+    fi
+
+    # Get the user pool domain
+    aws cognito-idp describe-user-pool \
+        --user-pool-id "$user_pool_id" \
+        --query "UserPool.Domain" \
         --output text \
         --profile ${AWS_PROFILE} \
         --region ${AWS_REGION} 2>/dev/null || echo ""
@@ -174,6 +211,55 @@ stack_exists() {
         --stack-name "$stack_name" \
         --profile ${AWS_PROFILE} \
         --region ${AWS_REGION} &>/dev/null
+}
+
+# Function to get S3 bucket by name pattern (excluding access-logs)
+get_s3_bucket_by_pattern() {
+    local pattern=$1
+
+    if [ -z "$pattern" ]; then
+        echo ""
+        return
+    fi
+
+    # List buckets and filter by pattern, excluding access-logs buckets using grep
+    aws s3api list-buckets \
+        --query "Buckets[?contains(Name, '$pattern')].Name" \
+        --output text \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} 2>/dev/null | tr '\t' '\n' | grep -v "access-logs" | head -1
+}
+
+# Function to get CloudFront distribution ID by origin (S3 bucket)
+get_cloudfront_distribution_by_origin() {
+    local bucket_name=$1
+
+    if [ -z "$bucket_name" ]; then
+        echo ""
+        return
+    fi
+
+    # Get distribution ID that has this bucket as any of its origins
+    # We need to check all origins, not just the first one
+    aws cloudfront list-distributions \
+        --query "DistributionList.Items[*].Id" \
+        --output json \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} 2>/dev/null | jq -r '.[]' | while read dist_id; do
+
+        # Check if this distribution has our bucket as any origin
+        local has_origin=$(aws cloudfront get-distribution \
+            --id "$dist_id" \
+            --query "Distribution.DistributionConfig.Origins.Items[?contains(DomainName, '$bucket_name')].DomainName | [0]" \
+            --output text \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null)
+
+        if [ -n "$has_origin" ] && [ "$has_origin" != "None" ]; then
+            echo "$dist_id"
+            return
+        fi
+    done
 }
 
 # Gather configuration from deployed stacks
@@ -240,92 +326,126 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
     echo ""
     
     # Get configuration values
-    echo -e "${BLUE}📋 Retrieving configuration values...${NC}"
-    
-    # Regular User Pool (from Foundation stack)
-    USER_POOL_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Foundation" "UserPoolId")
-    USER_POOL_CLIENT_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Foundation" "UserPoolClientId")
-    IDENTITY_POOL_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Foundation" "IdentityPoolId")
-    
-    # If customer client ID not found in stack outputs, try to fetch dynamically
-    if [ -z "$USER_POOL_CLIENT_ID" ] && [ -n "$USER_POOL_ID" ]; then
-        echo -e "${YELLOW}⚠️  Customer User Pool Client ID not found in stack outputs. Attempting to fetch dynamically...${NC}"
-        USER_POOL_CLIENT_ID=$(get_cognito_client_id "$USER_POOL_ID" "customer-client")
+    echo -e "${BLUE}📋 Retrieving configuration values directly from AWS resources...${NC}"
+
+    # Regular User Pool - Query by name instead of CloudFormation output
+    echo -e "${YELLOW}Looking up customer user pool...${NC}"
+    USER_POOL_ID=$(get_user_pool_id_by_name "${ENVIRONMENT}-harbormind-users")
+
+    if [ -z "$USER_POOL_ID" ]; then
+        echo -e "${YELLOW}⚠️  Customer user pool not found with name '${ENVIRONMENT}-harbormind-users'${NC}"
+        echo -e "${YELLOW}   Trying CloudFormation output as fallback...${NC}"
+        USER_POOL_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Foundation" "UserPoolId")
+    fi
+
+    if [ -n "$USER_POOL_ID" ]; then
+        echo -e "${GREEN}✅ Found customer user pool: ${USER_POOL_ID}${NC}"
+
+        # Get the first client for this user pool
+        USER_POOL_CLIENT_ID=$(get_cognito_client_id "$USER_POOL_ID")
         if [ -n "$USER_POOL_CLIENT_ID" ]; then
-            echo -e "${GREEN}✅ Found customer client ID: ${USER_POOL_CLIENT_ID}${NC}"
+            echo -e "${GREEN}✅ Found customer client: ${USER_POOL_CLIENT_ID}${NC}"
+        else
+            echo -e "${RED}❌ No client found for customer user pool${NC}"
+        fi
+
+        # Get Cognito domain directly
+        CUSTOMER_COGNITO_DOMAIN=$(get_cognito_domain "$USER_POOL_ID")
+        if [ -n "$CUSTOMER_COGNITO_DOMAIN" ]; then
+            # If domain is set, construct full domain URL
+            CUSTOMER_COGNITO_DOMAIN="${CUSTOMER_COGNITO_DOMAIN}.auth.${AWS_REGION}.amazoncognito.com"
+            echo -e "${GREEN}✅ Found customer Cognito domain: ${CUSTOMER_COGNITO_DOMAIN}${NC}"
+        else
+            echo -e "${YELLOW}⚠️  No Cognito domain configured for customer user pool${NC}"
         fi
     fi
-    
-    # Verify the customer client exists
-    if [ -n "$USER_POOL_ID" ] && [ -n "$USER_POOL_CLIENT_ID" ]; then
-        if ! verify_cognito_client "$USER_POOL_ID" "$USER_POOL_CLIENT_ID"; then
-            echo -e "${YELLOW}⚠️  Customer User Pool Client ${USER_POOL_CLIENT_ID} does not exist. Fetching current client...${NC}"
-            USER_POOL_CLIENT_ID=$(get_cognito_client_id "$USER_POOL_ID")
-            if [ -n "$USER_POOL_CLIENT_ID" ]; then
-                echo -e "${GREEN}✅ Found valid customer client ID: ${USER_POOL_CLIENT_ID}${NC}"
-            else
-                echo -e "${RED}❌ No valid customer client found for user pool ${USER_POOL_ID}${NC}"
-            fi
-        fi
+
+    # Identity Pool (optional, may not exist)
+    IDENTITY_POOL_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Foundation" "IdentityPoolId")
+
+    # Admin User Pool - Query by name instead of CloudFormation output
+    echo -e "${YELLOW}Looking up admin user pool...${NC}"
+    ADMIN_USER_POOL_ID=$(get_user_pool_id_by_name "harbormind-${ENVIRONMENT}-admin-user-pool")
+
+    if [ -z "$ADMIN_USER_POOL_ID" ]; then
+        echo -e "${YELLOW}⚠️  Admin user pool not found with name 'harbormind-${ENVIRONMENT}-admin-user-pool'${NC}"
+        echo -e "${YELLOW}   Trying CloudFormation output as fallback...${NC}"
+        ADMIN_USER_POOL_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminUserPoolId")
     fi
-    
-    # Get Cognito domain for customer user pool from stack output
-    CUSTOMER_COGNITO_DOMAIN=$(get_stack_output "HarborMind-${ENVIRONMENT}-Foundation" "UserPoolDomain")
-    if [ -z "$CUSTOMER_COGNITO_DOMAIN" ]; then
-        echo -e "${YELLOW}⚠️  No Cognito domain found for customer user pool. OAuth flows may not work.${NC}"
-    fi
-    
-    # Clean up domain if it has duplicate suffixes
-    if [[ "$CUSTOMER_COGNITO_DOMAIN" == *.amazonaws.com*.amazonaws.com ]]; then
-        CUSTOMER_COGNITO_DOMAIN=$(echo "$CUSTOMER_COGNITO_DOMAIN" | sed 's/\.auth\.us-east-1\.amazonaws\.com\.auth\.us-east-1\.amazonaws\.com/.auth.us-east-1.amazonaws.com/')
-        echo -e "${YELLOW}⚠️  Fixed duplicate domain suffix for customer domain${NC}"
-    fi
-    
-    # Admin User Pool (from Platform Admin stack)
-    ADMIN_USER_POOL_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminUserPoolId")
-    ADMIN_USER_POOL_CLIENT_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminUserPoolClientId")
-    ADMIN_COGNITO_DOMAIN=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminCognitoDomain")
-    
-    # If admin client ID not found in stack outputs, try to fetch dynamically
-    if [ -z "$ADMIN_USER_POOL_CLIENT_ID" ] && [ -n "$ADMIN_USER_POOL_ID" ]; then
-        echo -e "${YELLOW}⚠️  Admin User Pool Client ID not found in stack outputs. Attempting to fetch dynamically...${NC}"
-        ADMIN_USER_POOL_CLIENT_ID=$(get_cognito_client_id "$ADMIN_USER_POOL_ID" "admin-client")
+
+    if [ -n "$ADMIN_USER_POOL_ID" ]; then
+        echo -e "${GREEN}✅ Found admin user pool: ${ADMIN_USER_POOL_ID}${NC}"
+
+        # Get the first client for this user pool
+        ADMIN_USER_POOL_CLIENT_ID=$(get_cognito_client_id "$ADMIN_USER_POOL_ID")
         if [ -n "$ADMIN_USER_POOL_CLIENT_ID" ]; then
-            echo -e "${GREEN}✅ Found admin client ID: ${ADMIN_USER_POOL_CLIENT_ID}${NC}"
+            echo -e "${GREEN}✅ Found admin client: ${ADMIN_USER_POOL_CLIENT_ID}${NC}"
+        else
+            echo -e "${RED}❌ No client found for admin user pool${NC}"
         fi
-    fi
-    
-    # Verify the admin client exists
-    if [ -n "$ADMIN_USER_POOL_ID" ] && [ -n "$ADMIN_USER_POOL_CLIENT_ID" ]; then
-        if ! verify_cognito_client "$ADMIN_USER_POOL_ID" "$ADMIN_USER_POOL_CLIENT_ID"; then
-            echo -e "${YELLOW}⚠️  Admin User Pool Client ${ADMIN_USER_POOL_CLIENT_ID} does not exist. Fetching current client...${NC}"
-            ADMIN_USER_POOL_CLIENT_ID=$(get_cognito_client_id "$ADMIN_USER_POOL_ID")
-            if [ -n "$ADMIN_USER_POOL_CLIENT_ID" ]; then
-                echo -e "${GREEN}✅ Found valid admin client ID: ${ADMIN_USER_POOL_CLIENT_ID}${NC}"
-            else
-                echo -e "${RED}❌ No valid admin client found for user pool ${ADMIN_USER_POOL_ID}${NC}"
-            fi
+
+        # Get Cognito domain directly
+        ADMIN_COGNITO_DOMAIN=$(get_cognito_domain "$ADMIN_USER_POOL_ID")
+        if [ -n "$ADMIN_COGNITO_DOMAIN" ]; then
+            # If domain is set, construct full domain URL
+            ADMIN_COGNITO_DOMAIN="${ADMIN_COGNITO_DOMAIN}.auth.${AWS_REGION}.amazoncognito.com"
+            echo -e "${GREEN}✅ Found admin Cognito domain: ${ADMIN_COGNITO_DOMAIN}${NC}"
+        else
+            echo -e "${YELLOW}⚠️  No Cognito domain configured for admin user pool${NC}"
         fi
-    fi
-    
-    # Clean up admin domain if it has duplicate suffixes
-    if [[ "$ADMIN_COGNITO_DOMAIN" == *.amazonaws.com*.amazonaws.com ]]; then
-        ADMIN_COGNITO_DOMAIN=$(echo "$ADMIN_COGNITO_DOMAIN" | sed 's/\.auth\.us-east-1\.amazonaws\.com\.auth\.us-east-1\.amazonaws\.com/.auth.us-east-1.amazonaws.com/')
-        echo -e "${YELLOW}⚠️  Fixed duplicate domain suffix for admin domain${NC}"
     fi
     
     # API Gateway URLs (from ApiGateway stack)
     API_GATEWAY_URL=$(get_stack_output "HarborMind-${ENVIRONMENT}-ApiGateway" "ApiGatewayUrl")
     WEBSOCKET_API_URL=$(get_stack_output "HarborMind-${ENVIRONMENT}-ApiGateway" "WebSocketApiEndpointWithStage")
-    
-    # Frontend infrastructure
-    # App resources from Frontend stack
-    APP_BUCKET=$(get_stack_output "HarborMind-${ENVIRONMENT}-Frontend" "AppBucketName")
-    APP_DISTRIBUTION_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Frontend" "AppDistributionId")
-    
-    # Admin resources from Platform Admin stack
-    ADMIN_BUCKET=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminBucketName")
-    ADMIN_DISTRIBUTION_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminDistributionId")
+
+    # Frontend infrastructure - Query S3 buckets directly
+    echo -e "${YELLOW}Looking up S3 buckets and CloudFront distributions...${NC}"
+
+    # App resources - Try direct lookup first, then fallback to CloudFormation
+    # Note: The customer app bucket is named "harbormind-${ENV}-s3-frontend" (not "-app-frontend")
+    APP_BUCKET=$(get_s3_bucket_by_pattern "harbormind-${ENVIRONMENT}-s3-frontend")
+    if [ -z "$APP_BUCKET" ]; then
+        echo -e "${YELLOW}⚠️  App bucket not found by pattern, trying CloudFormation...${NC}"
+        APP_BUCKET=$(get_stack_output "HarborMind-${ENVIRONMENT}-Frontend" "AppBucketName")
+    fi
+
+    if [ -n "$APP_BUCKET" ]; then
+        echo -e "${GREEN}✅ Found app bucket: ${APP_BUCKET}${NC}"
+
+        # Get CloudFront distribution for this bucket
+        APP_DISTRIBUTION_ID=$(get_cloudfront_distribution_by_origin "$APP_BUCKET")
+        if [ -z "$APP_DISTRIBUTION_ID" ]; then
+            echo -e "${YELLOW}⚠️  App distribution not found by origin, trying CloudFormation...${NC}"
+            APP_DISTRIBUTION_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-Frontend" "AppDistributionId")
+        fi
+
+        if [ -n "$APP_DISTRIBUTION_ID" ]; then
+            echo -e "${GREEN}✅ Found app CloudFront distribution: ${APP_DISTRIBUTION_ID}${NC}"
+        fi
+    fi
+
+    # Admin resources - Try direct lookup first, then fallback to CloudFormation
+    ADMIN_BUCKET=$(get_s3_bucket_by_pattern "harbormind-${ENVIRONMENT}-s3-admin-frontend")
+    if [ -z "$ADMIN_BUCKET" ]; then
+        echo -e "${YELLOW}⚠️  Admin bucket not found by pattern, trying CloudFormation...${NC}"
+        ADMIN_BUCKET=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminBucketName")
+    fi
+
+    if [ -n "$ADMIN_BUCKET" ]; then
+        echo -e "${GREEN}✅ Found admin bucket: ${ADMIN_BUCKET}${NC}"
+
+        # Get CloudFront distribution for this bucket
+        ADMIN_DISTRIBUTION_ID=$(get_cloudfront_distribution_by_origin "$ADMIN_BUCKET")
+        if [ -z "$ADMIN_DISTRIBUTION_ID" ]; then
+            echo -e "${YELLOW}⚠️  Admin distribution not found by origin, trying CloudFormation...${NC}"
+            ADMIN_DISTRIBUTION_ID=$(get_stack_output "HarborMind-${ENVIRONMENT}-PlatformAdmin" "AdminDistributionId")
+        fi
+
+        if [ -n "$ADMIN_DISTRIBUTION_ID" ]; then
+            echo -e "${GREEN}✅ Found admin CloudFront distribution: ${ADMIN_DISTRIBUTION_ID}${NC}"
+        fi
+    fi
     
     # Construct domain URLs based on environment and configuration
     # For production, use clean URLs without environment prefix
