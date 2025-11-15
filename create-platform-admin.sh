@@ -27,12 +27,13 @@ echo ""
 
 # Get the Admin User Pool ID from CloudFormation Platform Admin stack
 echo "Retrieving Admin User Pool ID..."
-ADMIN_USER_POOL_ID=$(aws cloudformation describe-stacks \
-    --stack-name HarborMind-${ENVIRONMENT}-PlatformAdmin \
-    --query "Stacks[0].Outputs[?OutputKey=='AdminUserPoolId'].OutputValue" \
-    --output text \
-    --profile ${AWS_PROFILE} \
-    --region ${AWS_REGION} 2>/dev/null || echo "")
+#ADMIN_USER_POOL_ID=$(aws cloudformation describe-stacks \
+#    --stack-name HarborMind-${ENVIRONMENT}-PlatformAdmin \
+#    --query "Stacks[0].Outputs[?OutputKey=='AdminUserPoolId'].OutputValue" \
+#    --output text \
+#    --profile ${AWS_PROFILE} \
+#    --region ${AWS_REGION} 2>/dev/null || echo "")
+ADMIN_USER_POOL_ID=us-east-1_FthxNTyBf
 
 if [ -z "$ADMIN_USER_POOL_ID" ]; then
     echo -e "${RED}❌ Error: Could not find Admin User Pool ID${NC}"
