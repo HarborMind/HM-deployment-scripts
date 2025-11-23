@@ -235,45 +235,53 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
-        # Phase 2: Lambda Functions (must deploy first to export search function role to SSM)
+        # Phase 2: Lambda Functions (must deploy first to export function ARNs to SSM)
         echo -e "${BLUE}Phase 2: Lambda Functions${NC}"
-        echo -e "${YELLOW}Note: Lambda Functions stack must deploy before Analytics for SSM parameter dependencies${NC}"
+        echo -e "${YELLOW}Note: Lambda Functions stack exports function ARNs to SSM Parameter Store${NC}"
         if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
-            # Phase 3: Analytics and Operations (Analytics imports search function role from SSM)
-            echo -e "${BLUE}Phase 3: Analytics and Operations${NC}"
-            echo -e "${YELLOW}Note: Operations stack must deploy before API Gateway (catalog function SSM dependency)${NC}"
-            if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            # Phase 3: API Gateway (creates SSM parameters that Analytics needs)
+            echo -e "${BLUE}Phase 3: API Gateway${NC}"
+            echo -e "${YELLOW}Note: API Gateway must deploy before Analytics (API Gateway parameter dependencies)${NC}"
+            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
-                # Bootstrap OpenSearch VPC endpoint to SSM Parameter Store
-                echo -e "${BLUE}Bootstrapping OpenSearch VPC endpoint...${NC}"
-                OPENSEARCH_DOMAIN_NAME="hm-${ENVIRONMENT}-search"
-                VPC_ENDPOINT=$(aws opensearch describe-domain --domain-name ${OPENSEARCH_DOMAIN_NAME} --query 'DomainStatus.Endpoints.vpc' --output text --profile ${AWS_PROFILE} 2>/dev/null || echo "")
-
-                if [ -n "$VPC_ENDPOINT" ] && [ "$VPC_ENDPOINT" != "None" ]; then
-                    echo -e "${YELLOW}Found OpenSearch VPC endpoint: ${VPC_ENDPOINT}${NC}"
-                    aws ssm put-parameter \
-                        --name "/${ENVIRONMENT}/analytics/opensearch-endpoint" \
-                        --value "${VPC_ENDPOINT}" \
-                        --type String \
-                        --description "OpenSearch VPC endpoint for ${ENVIRONMENT} environment" \
-                        --overwrite \
-                        --profile ${AWS_PROFILE} \
-                        --region ${AWS_REGION} 2>/dev/null
-                    echo -e "${GREEN}✅ OpenSearch VPC endpoint stored in SSM Parameter Store${NC}"
-                else
-                    echo -e "${YELLOW}⚠️  OpenSearch domain not deployed in VPC or not found, skipping VPC endpoint bootstrap${NC}"
-                fi
-
-                # Phase 4: API Gateway and remaining stacks (API Gateway depends on Operations catalog functions)
-                echo -e "${BLUE}Phase 4: API Gateway, Security, and Frontend stacks${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway HarborMind-${ENVIRONMENT}-SecurityInfrastructure HarborMind-${ENVIRONMENT}-SecurityAuth HarborMind-${ENVIRONMENT}-Frontend --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                # Phase 4: Analytics and Operations (Analytics imports API Gateway parameters from SSM)
+                echo -e "${BLUE}Phase 4: Analytics and Operations${NC}"
+                echo -e "${YELLOW}Note: Analytics imports API Gateway parameters, Operations depends on Analytics${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 4 deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
+                else
+                    # Bootstrap OpenSearch VPC endpoint to SSM Parameter Store
+                    echo -e "${BLUE}Bootstrapping OpenSearch VPC endpoint...${NC}"
+                    OPENSEARCH_DOMAIN_NAME="hm-${ENVIRONMENT}-search"
+                    VPC_ENDPOINT=$(aws opensearch describe-domain --domain-name ${OPENSEARCH_DOMAIN_NAME} --query 'DomainStatus.Endpoints.vpc' --output text --profile ${AWS_PROFILE} 2>/dev/null || echo "")
+
+                    if [ -n "$VPC_ENDPOINT" ] && [ "$VPC_ENDPOINT" != "None" ]; then
+                        echo -e "${YELLOW}Found OpenSearch VPC endpoint: ${VPC_ENDPOINT}${NC}"
+                        aws ssm put-parameter \
+                            --name "/${ENVIRONMENT}/analytics/opensearch-endpoint" \
+                            --value "${VPC_ENDPOINT}" \
+                            --type String \
+                            --description "OpenSearch VPC endpoint for ${ENVIRONMENT} environment" \
+                            --overwrite \
+                            --profile ${AWS_PROFILE} \
+                            --region ${AWS_REGION} 2>/dev/null
+                        echo -e "${GREEN}✅ OpenSearch VPC endpoint stored in SSM Parameter Store${NC}"
+                    else
+                        echo -e "${YELLOW}⚠️  OpenSearch domain not deployed in VPC or not found, skipping VPC endpoint bootstrap${NC}"
+                    fi
+
+                    # Phase 5: Security and Frontend stacks
+                    echo -e "${BLUE}Phase 5: Security and Frontend stacks${NC}"
+                    if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure HarborMind-${ENVIRONMENT}-SecurityAuth HarborMind-${ENVIRONMENT}-Frontend --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                        echo -e "${RED}❌ Phase 5 deployment failed${NC}"
+                        DEPLOYMENT_SUCCESS=false
+                    fi
                 fi
             fi
         fi
