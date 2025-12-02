@@ -897,6 +897,47 @@ echo ""
 echo -e "${YELLOW}Note:${NC} CloudFront invalidation may take a few minutes to complete."
 echo ""
 
+# Upload master classification patterns to S3
+echo ""
+echo -e "${YELLOW}Uploading master classification patterns to S3...${NC}"
+
+# Get classification rules bucket from SSM
+RULES_BUCKET=$(aws ssm get-parameter \
+    --name "/${ENVIRONMENT}/s3/classification-rules-bucket/name" \
+    --query "Parameter.Value" \
+    --output text \
+    --profile ${AWS_PROFILE} \
+    --region ${AWS_REGION} 2>/dev/null || echo "")
+
+if [ -n "$RULES_BUCKET" ]; then
+    MASTER_PATTERNS_DIR="${PROJECT_ROOT}/SaaS-backend/api/lambdas/classification-rules/master_patterns"
+
+    if [ -d "$MASTER_PATTERNS_DIR" ]; then
+        # Upload all pattern files to S3 master directory
+        for lang_dir in ${MASTER_PATTERNS_DIR}/*/; do
+            if [ -d "$lang_dir" ]; then
+                lang=$(basename "$lang_dir")
+                for pattern_file in ${lang_dir}*.yaml; do
+                    if [ -f "$pattern_file" ]; then
+                        filename=$(basename "$pattern_file")
+                        echo -e "  Uploading master/${lang}/${filename}..."
+                        aws s3 cp "$pattern_file" "s3://${RULES_BUCKET}/master/${lang}/${filename}" \
+                            --profile ${AWS_PROFILE} \
+                            --region ${AWS_REGION} \
+                            --cache-control "no-cache, no-store, must-revalidate" \
+                            --content-type "application/x-yaml"
+                    fi
+                done
+            fi
+        done
+        echo -e "${GREEN}✅ Master classification patterns uploaded to S3${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Master patterns directory not found: ${MASTER_PATTERNS_DIR}${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  Classification rules bucket not found in SSM - skipping pattern upload${NC}"
+fi
+
 # Save deployment info
 DEPLOYMENT_INFO="${CDK_DIR}/.last-deployment-${ENVIRONMENT}.json"
 cat > "$DEPLOYMENT_INFO" <<EOF
