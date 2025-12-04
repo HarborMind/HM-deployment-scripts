@@ -173,7 +173,7 @@ deploy_cdk() {
     
     # Synthesize CloudFormation
     echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
-    cdk synth --profile ${AWS_PROFILE}
+    cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
     
     # Deploy
     echo -e "${YELLOW}Deploying stacks...${NC}"
@@ -225,34 +225,34 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
     # Synthesize CloudFormation
     echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
-    cdk synth --profile ${AWS_PROFILE}
+    cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
 
     echo ""
 
     # Phase 1: Foundation stacks
     echo -e "${BLUE}Phase 1: Foundation stacks (DNS, Foundation, Data)${NC}"
-    if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS HarborMind-${ENVIRONMENT}-Foundation HarborMind-${ENVIRONMENT}-Data --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+    if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS HarborMind-${ENVIRONMENT}-Foundation Data -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
         # Phase 2: Lambda Functions (must deploy first to export function ARNs to SSM)
         echo -e "${BLUE}Phase 2: Lambda Functions${NC}"
         echo -e "${YELLOW}Note: Lambda Functions stack exports function ARNs to SSM Parameter Store${NC}"
-        if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+        if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
             # Phase 3: API Gateway (creates SSM parameters that Analytics needs)
             echo -e "${BLUE}Phase 3: API Gateway${NC}"
             echo -e "${YELLOW}Note: API Gateway must deploy before Analytics (API Gateway parameter dependencies)${NC}"
-            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
                 # Phase 4: Analytics and Operations (Analytics imports API Gateway parameters from SSM)
                 echo -e "${BLUE}Phase 4: Analytics and Operations${NC}"
                 echo -e "${YELLOW}Note: Analytics imports API Gateway parameters, Operations depends on Analytics${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 4 deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
@@ -278,7 +278,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
                     # Phase 5: Security and Frontend stacks
                     echo -e "${BLUE}Phase 5: Security and Frontend stacks${NC}"
-                    if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure HarborMind-${ENVIRONMENT}-SecurityAuth HarborMind-${ENVIRONMENT}-Frontend --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure HarborMind-${ENVIRONMENT}-SecurityAuth HarborMind-${ENVIRONMENT}-Frontend -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                         echo -e "${RED}❌ Phase 5 deployment failed${NC}"
                         DEPLOYMENT_SUCCESS=false
                     fi
@@ -308,14 +308,14 @@ if [ "$DEPLOYMENT_SUCCESS" = true ]; then
     
     if [[ "$DEPLOY_TYPE" == "platform" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${YELLOW}Platform Admin Stacks:${NC}"
-        cd "$PLATFORM_CDK_DIR" && cdk ls --profile ${AWS_PROFILE} 2>/dev/null | while read stack; do
+        cd "$PLATFORM_CDK_DIR" && cdk ls -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} 2>/dev/null | while read stack; do
             echo -e "  - ${GREEN}${stack}${NC}"
         done
     fi
     
     if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${YELLOW}Customer App Stacks:${NC}"
-        cd "$CUSTOMER_CDK_DIR" && cdk ls --profile ${AWS_PROFILE} 2>/dev/null | while read stack; do
+        cd "$CUSTOMER_CDK_DIR" && cdk ls -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} 2>/dev/null | while read stack; do
             echo -e "  - ${GREEN}${stack}${NC}"
         done
     fi
