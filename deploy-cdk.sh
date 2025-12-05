@@ -229,58 +229,103 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
     echo ""
 
-    # Phase 1: Foundation stacks
-    echo -e "${BLUE}Phase 1: Foundation stacks (DNS, Foundation, Data)${NC}"
-    if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS HarborMind-${ENVIRONMENT}-Foundation Data -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+    # Phase 1: DNS
+    echo -e "${BLUE}Phase 1: DNS${NC}"
+    if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
-        # Phase 2: Lambda Functions (must deploy first to export function ARNs to SSM)
-        echo -e "${BLUE}Phase 2: Lambda Functions${NC}"
-        echo -e "${YELLOW}Note: Lambda Functions stack exports function ARNs to SSM Parameter Store${NC}"
-        if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+        # Phase 2: Foundation
+        echo -e "${BLUE}Phase 2: Foundation${NC}"
+        if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
-            # Phase 3: API Gateway (creates SSM parameters that Analytics needs)
-            echo -e "${BLUE}Phase 3: API Gateway${NC}"
-            echo -e "${YELLOW}Note: API Gateway must deploy before Analytics (API Gateway parameter dependencies)${NC}"
-            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            # Phase 3: Data
+            echo -e "${BLUE}Phase 3: Data${NC}"
+            if ! cdk deploy Data -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
-                # Phase 4: Analytics and Operations (Analytics imports API Gateway parameters from SSM)
-                echo -e "${BLUE}Phase 4: Analytics and Operations${NC}"
-                echo -e "${YELLOW}Note: Analytics imports API Gateway parameters, Operations depends on Analytics${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                # Phase 4: Lambda Functions and SearchData
+                echo -e "${BLUE}Phase 4: Lambda Functions and SearchData${NC}"
+                echo -e "${YELLOW}Note: Lambda Functions exports function ARNs to SSM, SearchData is isolated for independent lifecycle management${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions HarborMind-${ENVIRONMENT}-SearchData -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 4 deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
-                    # Bootstrap OpenSearch VPC endpoint to SSM Parameter Store
-                    echo -e "${BLUE}Bootstrapping OpenSearch VPC endpoint...${NC}"
-                    OPENSEARCH_DOMAIN_NAME="hm-${ENVIRONMENT}-search"
-                    VPC_ENDPOINT=$(aws opensearch describe-domain --domain-name ${OPENSEARCH_DOMAIN_NAME} --query 'DomainStatus.Endpoints.vpc' --output text --profile ${AWS_PROFILE} 2>/dev/null || echo "")
-
-                    if [ -n "$VPC_ENDPOINT" ] && [ "$VPC_ENDPOINT" != "None" ]; then
-                        echo -e "${YELLOW}Found OpenSearch VPC endpoint: ${VPC_ENDPOINT}${NC}"
-                        aws ssm put-parameter \
-                            --name "/${ENVIRONMENT}/analytics/opensearch-endpoint" \
-                            --value "${VPC_ENDPOINT}" \
-                            --type String \
-                            --description "OpenSearch VPC endpoint for ${ENVIRONMENT} environment" \
-                            --overwrite \
-                            --profile ${AWS_PROFILE} \
-                            --region ${AWS_REGION} 2>/dev/null
-                        echo -e "${GREEN}✅ OpenSearch VPC endpoint stored in SSM Parameter Store${NC}"
-                    else
-                        echo -e "${YELLOW}⚠️  OpenSearch domain not deployed in VPC or not found, skipping VPC endpoint bootstrap${NC}"
-                    fi
-
-                    # Phase 5: Security and Frontend stacks
-                    echo -e "${BLUE}Phase 5: Security and Frontend stacks${NC}"
-                    if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure HarborMind-${ENVIRONMENT}-SecurityAuth HarborMind-${ENVIRONMENT}-Frontend -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    # Phase 5: API Gateway Core (creates SSM parameters that Analytics needs)
+                    echo -e "${BLUE}Phase 5: API Gateway Core${NC}"
+                    echo -e "${YELLOW}Note: API Gateway Core creates the base REST API and must deploy before route stacks${NC}"
+                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                         echo -e "${RED}❌ Phase 5 deployment failed${NC}"
                         DEPLOYMENT_SUCCESS=false
+                    else
+                        # Bootstrap OpenSearch VPC endpoint to SSM Parameter Store (after SearchData)
+                        echo -e "${BLUE}Bootstrapping OpenSearch VPC endpoint...${NC}"
+                        OPENSEARCH_DOMAIN_NAME="hm-${ENVIRONMENT}-search"
+                        VPC_ENDPOINT=$(aws opensearch describe-domain --domain-name ${OPENSEARCH_DOMAIN_NAME} --query 'DomainStatus.Endpoints.vpc' --output text --profile ${AWS_PROFILE} 2>/dev/null || echo "")
+
+                        if [ -n "$VPC_ENDPOINT" ] && [ "$VPC_ENDPOINT" != "None" ]; then
+                            echo -e "${YELLOW}Found OpenSearch VPC endpoint: ${VPC_ENDPOINT}${NC}"
+                            aws ssm put-parameter \
+                                --name "/${ENVIRONMENT}/searchdata/opensearch/vpc-endpoint" \
+                                --value "${VPC_ENDPOINT}" \
+                                --type String \
+                                --description "OpenSearch VPC endpoint for ${ENVIRONMENT} environment" \
+                                --overwrite \
+                                --profile ${AWS_PROFILE} \
+                                --region ${AWS_REGION} 2>/dev/null
+                            echo -e "${GREEN}✅ OpenSearch VPC endpoint stored in SSM Parameter Store${NC}"
+                        else
+                            echo -e "${YELLOW}⚠️  OpenSearch domain not deployed in VPC or not found, skipping VPC endpoint bootstrap${NC}"
+                        fi
+
+                        # Phase 6: SecurityAuth
+                        echo -e "${BLUE}Phase 6: SecurityAuth${NC}"
+                        if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityAuth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                            echo -e "${RED}❌ Phase 6 deployment failed${NC}"
+                            DEPLOYMENT_SUCCESS=false
+                        else
+                            # Phase 7: Analytics
+                            echo -e "${BLUE}Phase 7: Analytics${NC}"
+                            echo -e "${YELLOW}Note: Analytics imports API Gateway and SearchData parameters from SSM${NC}"
+                            if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                echo -e "${RED}❌ Phase 7 deployment failed${NC}"
+                                DEPLOYMENT_SUCCESS=false
+                            else
+                                # Phase 8: Operations (creates Lambda functions needed by API Routes)
+                                echo -e "${BLUE}Phase 8: Operations${NC}"
+                                echo -e "${YELLOW}Note: Operations creates Lambda functions (ScanManagement, CatalogManagement, AwsAccountManagement) needed by API Routes${NC}"
+                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                    echo -e "${RED}❌ Phase 8 deployment failed${NC}"
+                                    DEPLOYMENT_SUCCESS=false
+                                else
+                                    # Phase 9: API Routes (depends on Operations for Lambda functions)
+                                    echo -e "${BLUE}Phase 9: API Routes${NC}"
+                                    echo -e "${YELLOW}Note: Deploying route stacks for Orchestrators, Data, Config, and Search${NC}"
+                                    echo -e "${YELLOW}      Data/Orchestrators depend on Operations for scan/catalog Lambda functions${NC}"
+                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiRoutes-Orchestrators HarborMind-${ENVIRONMENT}-ApiRoutes-Data HarborMind-${ENVIRONMENT}-ApiRoutes-Config HarborMind-${ENVIRONMENT}-ApiRoutes-Search -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                        echo -e "${RED}❌ Phase 9 deployment failed${NC}"
+                                        DEPLOYMENT_SUCCESS=false
+                                    else
+                                        # Phase 10: SecurityInfrastructure
+                                        echo -e "${BLUE}Phase 10: SecurityInfrastructure${NC}"
+                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                            echo -e "${RED}❌ Phase 10 deployment failed${NC}"
+                                            DEPLOYMENT_SUCCESS=false
+                                        else
+                                            # Phase 11: Frontend
+                                            echo -e "${BLUE}Phase 11: Frontend${NC}"
+                                            if ! cdk deploy HarborMind-${ENVIRONMENT}-Frontend -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                                echo -e "${RED}❌ Phase 11 deployment failed${NC}"
+                                                DEPLOYMENT_SUCCESS=false
+                                            fi
+                                        fi
+                                    fi
+                                fi
+                            fi
+                        fi
                     fi
                 fi
             fi

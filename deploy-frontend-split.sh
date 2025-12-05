@@ -285,11 +285,11 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
         echo -e "${GREEN}✓${NC} Platform Admin stack found"
     fi
     
-    # API Gateway stack (required for both)
-    if ! stack_exists "HarborMind-${ENVIRONMENT}-ApiGateway"; then
-        MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-ApiGateway (provides API endpoints)")
+    # API Gateway Core stack (required for both) - Note: ApiGateway was split into ApiGatewayCore + ApiRoutes-* stacks
+    if ! stack_exists "HarborMind-${ENVIRONMENT}-ApiGatewayCore"; then
+        MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-ApiGatewayCore (provides API endpoints)")
     else
-        echo -e "${GREEN}✓${NC} API Gateway stack found"
+        echo -e "${GREEN}✓${NC} API Gateway Core stack found"
     fi
     
     # Frontend stack (required for customer app)
@@ -318,7 +318,7 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
         echo -e "${YELLOW}Or deploy individual stacks:${NC}"
         echo -e "   cdk deploy HarborMind-${ENVIRONMENT}-Foundation"
         echo -e "   cdk deploy HarborMind-${ENVIRONMENT}-PlatformAdmin"
-        echo -e "   cdk deploy HarborMind-${ENVIRONMENT}-ApiGateway"
+        echo -e "   cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore"
         echo -e "   cdk deploy HarborMind-${ENVIRONMENT}-Frontend"
         exit 1
     fi
@@ -395,9 +395,9 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
         fi
     fi
     
-    # API Gateway URLs (from ApiGateway stack)
-    API_GATEWAY_URL=$(get_stack_output "HarborMind-${ENVIRONMENT}-ApiGateway" "ApiGatewayUrl")
-    WEBSOCKET_API_URL=$(get_stack_output "HarborMind-${ENVIRONMENT}-ApiGateway" "WebSocketApiEndpointWithStage")
+    # API Gateway URLs (from ApiGatewayCore stack - note: ApiGateway was split into ApiGatewayCore + ApiRoutes-* stacks)
+    API_GATEWAY_URL=$(get_stack_output "HarborMind-${ENVIRONMENT}-ApiGatewayCore" "RestApiEndpoint")
+    WEBSOCKET_API_URL=$(get_stack_output "HarborMind-${ENVIRONMENT}-ApiGatewayCore" "WebSocketApiEndpointWithStage")
 
     # Frontend infrastructure - Query S3 buckets directly
     echo -e "${YELLOW}Looking up S3 buckets and CloudFront distributions...${NC}"
