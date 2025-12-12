@@ -241,9 +241,10 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
-            # Phase 3: Data
-            echo -e "${BLUE}Phase 3: Data${NC}"
-            if ! cdk deploy Data -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            # Phase 3: Data and CSPM (CSPM reads KMS key ARN from SSM - no stack dependency)
+            echo -e "${BLUE}Phase 3: Data and CSPM${NC}"
+            echo -e "${YELLOW}Note: CSPM creates the cspm-findings DynamoDB table for Prowler security findings${NC}"
+            if ! cdk deploy Data HarborMind-${ENVIRONMENT}-CSPM -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else

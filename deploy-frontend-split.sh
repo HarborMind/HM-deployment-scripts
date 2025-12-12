@@ -665,6 +665,23 @@ EOF
     fi
 fi
 
+# Extract scanner permissions from CloudFormation template for IAM policy display
+if [[ "$DEPLOY_TYPE" == "app" || "$DEPLOY_TYPE" == "both" ]]; then
+    echo ""
+    echo -e "${YELLOW}Extracting scanner permissions from CloudFormation template...${NC}"
+    if [ -f "${SCRIPT_DIR}/extract-scanner-permissions.js" ]; then
+        node "${SCRIPT_DIR}/extract-scanner-permissions.js"
+        if [ -f "${FRONTEND_APP_DIR}/public/scanner-permissions.json" ]; then
+            echo -e "${GREEN}✅ Scanner permissions extracted successfully${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Failed to extract scanner permissions, IAM policy display will use fallback${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ extract-scanner-permissions.js not found, skipping${NC}"
+    fi
+    echo ""
+fi
+
 # Function to build frontend
 build_frontend() {
     local type=$1
@@ -936,6 +953,46 @@ if [ -n "$RULES_BUCKET" ]; then
     fi
 else
     echo -e "${YELLOW}⚠️  Classification rules bucket not found in SSM - skipping pattern upload${NC}"
+fi
+
+# Upload CSPM rules to S3 (reuses classification-rules bucket)
+echo ""
+echo -e "${YELLOW}Uploading CSPM rules to S3...${NC}"
+
+# Reuse classification-rules bucket for CSPM rules
+CSPM_RULES_BUCKET=$(aws ssm get-parameter \
+    --name "/${ENVIRONMENT}/s3/classification-rules-bucket/name" \
+    --query "Parameter.Value" \
+    --output text \
+    --profile ${AWS_PROFILE} \
+    --region ${AWS_REGION} 2>/dev/null || echo "")
+
+if [ -n "$CSPM_RULES_BUCKET" ]; then
+    CSPM_RULES_DIR="${PROJECT_ROOT}/SaaS-backend/api/lambdas/cspm-rules/rules"
+
+    if [ -d "$CSPM_RULES_DIR" ]; then
+        for provider_dir in ${CSPM_RULES_DIR}/*/; do
+            if [ -d "$provider_dir" ]; then
+                provider=$(basename "$provider_dir")
+                for rule_file in ${provider_dir}*.yaml; do
+                    if [ -f "$rule_file" ]; then
+                        filename=$(basename "$rule_file")
+                        echo -e "  Uploading cspm/rules/${provider}/${filename}..."
+                        aws s3 cp "$rule_file" "s3://${CSPM_RULES_BUCKET}/cspm/rules/${provider}/${filename}" \
+                            --profile ${AWS_PROFILE} \
+                            --region ${AWS_REGION} \
+                            --cache-control "no-cache" \
+                            --content-type "application/x-yaml"
+                    fi
+                done
+            fi
+        done
+        echo -e "${GREEN}✅ CSPM rules uploaded to S3${NC}"
+    else
+        echo -e "${YELLOW}⚠️  CSPM rules directory not found: ${CSPM_RULES_DIR}${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  Classification rules bucket not found in SSM - skipping CSPM rules upload${NC}"
 fi
 
 # Save deployment info

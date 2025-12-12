@@ -28,6 +28,31 @@ try {
   yaml = require('js-yaml');
 }
 
+// Define custom CloudFormation tags so js-yaml can parse the template
+const cfnTags = [
+  'Ref', 'Sub', 'Join', 'GetAtt', 'If', 'Not', 'Equals', 'And', 'Or',
+  'Condition', 'Base64', 'Cidr', 'FindInMap', 'GetAZs', 'ImportValue',
+  'Select', 'Split', 'Transform'
+];
+
+// Create a schema that treats CloudFormation intrinsic functions as simple objects
+const CFN_SCHEMA = yaml.DEFAULT_SCHEMA.extend(
+  cfnTags.map(tag => new yaml.Type(`!${tag}`, {
+    kind: 'scalar',
+    construct: data => ({ [`Fn::${tag}`]: data })
+  })).concat(
+    cfnTags.map(tag => new yaml.Type(`!${tag}`, {
+      kind: 'sequence',
+      construct: data => ({ [`Fn::${tag}`]: data })
+    }))
+  ).concat(
+    cfnTags.map(tag => new yaml.Type(`!${tag}`, {
+      kind: 'mapping',
+      construct: data => ({ [`Fn::${tag}`]: data })
+    }))
+  )
+);
+
 console.log('📋 Extracting scanner permissions from CloudFormation template...');
 console.log(`   Source: ${TEMPLATE_PATH}`);
 console.log(`   Output: ${OUTPUT_PATH}`);
@@ -41,7 +66,7 @@ if (!fs.existsSync(TEMPLATE_PATH)) {
 try {
   // Read and parse the CloudFormation template
   const templateContent = fs.readFileSync(TEMPLATE_PATH, 'utf8');
-  const template = yaml.load(templateContent);
+  const template = yaml.load(templateContent, { schema: CFN_SCHEMA });
 
   // Find the ScannerTaskRole resource
   const scannerTaskRole = template.Resources?.ScannerTaskRole;
