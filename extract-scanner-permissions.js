@@ -7,11 +7,44 @@
  * all IAM policies from the ScannerTaskRole resource to create a JSON file
  * that the frontend can use to display the permissions policy.
  *
+ * The policies are split into two managed policies to stay under AWS IAM's
+ * 6144 character limit per policy:
+ * - HarborMindScannerPolicy: Core data scanning permissions
+ * - HarborMindCSPMPolicy: Security monitoring and CSPM permissions
+ *
  * Run this script before building the frontend to keep policies in sync.
  */
 
 const fs = require('fs');
 const path = require('path');
+
+// AWS IAM limit for managed policies (non-whitespace characters)
+const IAM_POLICY_CHAR_LIMIT = 6144;
+
+// Define which policies go into each bucket
+const SCANNER_POLICY_NAMES = [
+  'S3ReadAccess',
+  'RDSReadAccess',
+  'DynamoDBReadAccess',
+  'RedshiftReadAccess',
+  'RedshiftServerlessReadAccess',
+  'RedshiftDataAPIAccess',
+  'NeptuneReadAccess',
+  'NeptuneDataAccess',
+  'EC2ReadAccess',
+  'FileSystemReadAccess'
+];
+
+const CSPM_POLICY_NAMES = [
+  'SageMakerReadAccess',
+  'GlueReadAccess',
+  'BedrockReadAccess',
+  'CSPMReadAccess',
+  'CloudWatchMetrics',
+  'SecretsManagerAccess',
+  'KMSDecryptAccess',
+  'CrossAccountAssumeRole'
+];
 
 // Paths
 const SCRIPT_DIR = __dirname;
@@ -75,9 +108,11 @@ try {
     process.exit(1);
   }
 
-  // Extract all policy statements
-  const statements = [];
-  const policyNames = [];
+  // Extract all policy statements, organized by policy name
+  const scannerStatements = [];
+  const cspmStatements = [];
+  const scannerPolicyNames = [];
+  const cspmPolicyNames = [];
 
   const policies = scannerTaskRole.Properties?.Policies || [];
 
@@ -95,37 +130,95 @@ try {
     }
 
     const policyName = policy.PolicyName || `Policy${index}`;
-    policyNames.push(policyName);
 
-    // Process each statement in the policy
-    policy.PolicyDocument.Statement.forEach(statement => {
-      // Clean up CloudFormation intrinsic functions for display
-      const cleanedStatement = cleanStatement(statement);
-      statements.push(cleanedStatement);
-    });
+    // Determine which bucket this policy belongs to
+    const isScanner = SCANNER_POLICY_NAMES.includes(policyName);
+    const isCspm = CSPM_POLICY_NAMES.includes(policyName);
 
-    console.log(`   ✓ Extracted: ${policyName} (${policy.PolicyDocument.Statement.length} statements)`);
+    if (isScanner) {
+      scannerPolicyNames.push(policyName);
+      policy.PolicyDocument.Statement.forEach(statement => {
+        scannerStatements.push(cleanStatement(statement));
+      });
+      console.log(`   ✓ Scanner: ${policyName} (${policy.PolicyDocument.Statement.length} statements)`);
+    } else if (isCspm) {
+      cspmPolicyNames.push(policyName);
+      policy.PolicyDocument.Statement.forEach(statement => {
+        cspmStatements.push(cleanStatement(statement));
+      });
+      console.log(`   ✓ CSPM: ${policyName} (${policy.PolicyDocument.Statement.length} statements)`);
+    } else {
+      // Unknown policy - add to scanner by default
+      scannerPolicyNames.push(policyName);
+      policy.PolicyDocument.Statement.forEach(statement => {
+        scannerStatements.push(cleanStatement(statement));
+      });
+      console.log(`   ⚠️  Unknown (added to Scanner): ${policyName} (${policy.PolicyDocument.Statement.length} statements)`);
+    }
   });
 
-  // Create the output JSON
+  // Build the two policies
+  const scannerPolicy = {
+    Version: '2012-10-17',
+    Statement: scannerStatements
+  };
+
+  const cspmPolicy = {
+    Version: '2012-10-17',
+    Statement: cspmStatements
+  };
+
+  // Calculate character counts
+  const scannerChars = JSON.stringify(scannerPolicy).replace(/\s/g, '').length;
+  const cspmChars = JSON.stringify(cspmPolicy).replace(/\s/g, '').length;
+
+  console.log('');
+  console.log(`   📊 HarborMindScannerPolicy: ${scannerChars} chars (limit: ${IAM_POLICY_CHAR_LIMIT})`);
+  console.log(`   📊 HarborMindCSPMPolicy: ${cspmChars} chars (limit: ${IAM_POLICY_CHAR_LIMIT})`);
+
+  if (scannerChars > IAM_POLICY_CHAR_LIMIT) {
+    console.warn(`   ⚠️  WARNING: Scanner policy exceeds limit by ${scannerChars - IAM_POLICY_CHAR_LIMIT} chars`);
+  }
+  if (cspmChars > IAM_POLICY_CHAR_LIMIT) {
+    console.warn(`   ⚠️  WARNING: CSPM policy exceeds limit by ${cspmChars - IAM_POLICY_CHAR_LIMIT} chars`);
+  }
+
+  // Create the output JSON with both policies
   const output = {
     version: new Date().toISOString().split('T')[0],
     generatedAt: new Date().toISOString(),
     sourceTemplate: 'AWS-ECS-Fleet-Template-Dynamic.yaml',
     roleNamePattern: 'HarborMind-ScannerTaskRole-{region}',
-    extractedPolicies: policyNames,
-    totalStatements: statements.length,
-    permissionsPolicy: {
-      Version: '2012-10-17',
-      Statement: statements
-    }
+    policies: [
+      {
+        name: 'HarborMindScannerPolicy',
+        description: 'Core data scanning permissions for S3, RDS, DynamoDB, Redshift, Neptune, EFS, and EC2',
+        extractedFrom: scannerPolicyNames,
+        statementCount: scannerStatements.length,
+        characterCount: scannerChars,
+        policy: scannerPolicy
+      },
+      {
+        name: 'HarborMindCSPMPolicy',
+        description: 'Security monitoring and CSPM permissions for IAM, CloudTrail, GuardDuty, Security Hub, and more',
+        extractedFrom: cspmPolicyNames,
+        statementCount: cspmStatements.length,
+        characterCount: cspmChars,
+        policy: cspmPolicy
+      }
+    ],
+    totalStatements: scannerStatements.length + cspmStatements.length,
+    // Keep legacy field for backwards compatibility
+    permissionsPolicy: scannerPolicy
   };
 
   // Write the output file
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(output, null, 2));
 
   console.log('');
-  console.log(`✅ Successfully extracted ${statements.length} policy statements from ${policyNames.length} policies`);
+  console.log(`✅ Successfully extracted ${scannerStatements.length + cspmStatements.length} policy statements`);
+  console.log(`   - HarborMindScannerPolicy: ${scannerStatements.length} statements from ${scannerPolicyNames.length} policies`);
+  console.log(`   - HarborMindCSPMPolicy: ${cspmStatements.length} statements from ${cspmPolicyNames.length} policies`);
   console.log(`   Output written to: ${OUTPUT_PATH}`);
 
 } catch (error) {
