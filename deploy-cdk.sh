@@ -310,6 +310,21 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                         echo -e "${RED}❌ Phase 9 deployment failed${NC}"
                                         DEPLOYMENT_SUCCESS=false
                                     else
+                                        # Create API Gateway deployment to activate route changes
+                                        echo -e "${BLUE}Creating API Gateway deployment...${NC}"
+                                        REST_API_ID=$(aws ssm get-parameter --name "/${ENVIRONMENT}/api-gateway/rest-api/id" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+                                        if [ -n "$REST_API_ID" ] && [ "$REST_API_ID" != "None" ]; then
+                                            aws apigateway create-deployment \
+                                                --rest-api-id ${REST_API_ID} \
+                                                --stage-name ${ENVIRONMENT} \
+                                                --description "Post-CDK deployment for ${ENVIRONMENT}" \
+                                                --profile ${AWS_PROFILE} \
+                                                --region ${AWS_REGION} 2>/dev/null
+                                            echo -e "${GREEN}✅ API Gateway deployment created${NC}"
+                                        else
+                                            echo -e "${YELLOW}⚠️  Could not find REST API ID, skipping deployment${NC}"
+                                        fi
+
                                         # Phase 10: SecurityInfrastructure
                                         echo -e "${BLUE}Phase 10: SecurityInfrastructure${NC}"
                                         if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
