@@ -195,6 +195,66 @@ deploy_cdk() {
     echo ""
 }
 
+# Function to configure provisioned concurrency for latency-sensitive Lambda functions
+# This is done outside of CDK to avoid Lambda version conflicts during deployment
+configure_provisioned_concurrency() {
+    local function_name=$1
+    local alias_name="live"
+    local concurrency=${2:-1}
+
+    echo -e "${YELLOW}  Configuring provisioned concurrency for ${function_name}...${NC}"
+
+    # Check if function exists
+    if ! aws lambda get-function --function-name ${function_name} --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+        echo -e "${YELLOW}  ⚠️  Function ${function_name} not found, skipping${NC}"
+        return 0
+    fi
+
+    # Publish new version
+    VERSION=$(aws lambda publish-version \
+        --function-name ${function_name} \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} \
+        --query 'Version' --output text 2>/dev/null)
+
+    if [ -z "$VERSION" ] || [ "$VERSION" == "None" ]; then
+        echo -e "${RED}  ❌ Failed to publish version for ${function_name}${NC}"
+        return 1
+    fi
+
+    # Create or update alias
+    if aws lambda get-alias --function-name ${function_name} --name ${alias_name} --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+        aws lambda update-alias \
+            --function-name ${function_name} \
+            --name ${alias_name} \
+            --function-version ${VERSION} \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} >/dev/null 2>&1
+    else
+        aws lambda create-alias \
+            --function-name ${function_name} \
+            --name ${alias_name} \
+            --function-version ${VERSION} \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} >/dev/null 2>&1
+    fi
+
+    # Set provisioned concurrency
+    aws lambda put-provisioned-concurrency-config \
+        --function-name ${function_name} \
+        --qualifier ${alias_name} \
+        --provisioned-concurrent-executions ${concurrency} \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} >/dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}  ✅ Provisioned concurrency configured (version ${VERSION})${NC}"
+    else
+        echo -e "${RED}  ❌ Failed to configure provisioned concurrency${NC}"
+        return 1
+    fi
+}
+
 # Deploy based on type
 DEPLOYMENT_SUCCESS=true
 
@@ -302,6 +362,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     echo -e "${RED}❌ Phase 8 deployment failed${NC}"
                                     DEPLOYMENT_SUCCESS=false
                                 else
+                                    # Configure provisioned concurrency for latency-sensitive functions
+                                    echo -e "${BLUE}Configuring provisioned concurrency for latency-sensitive Lambda functions...${NC}"
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-dashboard-metrics"
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-list-integrations"
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-update-integration"
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-catalog-findings"
+                                    echo ""
+
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
                                     echo -e "${BLUE}Phase 9: API Routes${NC}"
                                     echo -e "${YELLOW}Note: Deploying route stacks for Orchestrators, Data, Config, and Search${NC}"
