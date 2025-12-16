@@ -669,15 +669,17 @@ fi
 if [[ "$DEPLOY_TYPE" == "app" || "$DEPLOY_TYPE" == "both" ]]; then
     echo ""
     echo -e "${YELLOW}Extracting scanner permissions from CloudFormation template...${NC}"
-    if [ -f "${SCRIPT_DIR}/extract-scanner-permissions.js" ]; then
-        node "${SCRIPT_DIR}/extract-scanner-permissions.js"
+    cd "${FRONTEND_APP_DIR}"
+    if npm run extract-permissions 2>/dev/null; then
         if [ -f "${FRONTEND_APP_DIR}/public/scanner-permissions.json" ]; then
-            echo -e "${GREEN}✅ Scanner permissions extracted successfully${NC}"
+            POLICY_COUNT=$(jq '.policies | length' "${FRONTEND_APP_DIR}/public/scanner-permissions.json" 2>/dev/null || echo "0")
+            STATEMENT_COUNT=$(jq '.totalStatements' "${FRONTEND_APP_DIR}/public/scanner-permissions.json" 2>/dev/null || echo "0")
+            echo -e "${GREEN}✅ Scanner permissions extracted: ${POLICY_COUNT} policies, ${STATEMENT_COUNT} statements${NC}"
         else
             echo -e "${YELLOW}⚠️ Failed to extract scanner permissions, IAM policy display will use fallback${NC}"
         fi
     else
-        echo -e "${YELLOW}⚠️ extract-scanner-permissions.js not found, skipping${NC}"
+        echo -e "${YELLOW}⚠️ extract-permissions script failed, IAM policy display will use fallback${NC}"
     fi
     echo ""
 fi
