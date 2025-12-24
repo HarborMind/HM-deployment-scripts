@@ -802,9 +802,10 @@ deploy_to_s3() {
         fi
     done
 
-    # Upload CloudFormation templates without cache (so updates are immediate)
+    # Upload CloudFormation/ARM templates without cache (so updates are immediate)
     if [ -d "${dist_dir}/templates" ]; then
-        echo -e "${YELLOW}Uploading CloudFormation templates...${NC}"
+        echo -e "${YELLOW}Uploading deployment templates...${NC}"
+        # Upload YAML templates (AWS CloudFormation)
         for template in ${dist_dir}/templates/*.yaml; do
             if [ -f "$template" ]; then
                 filename=$(basename "$template")
@@ -813,6 +814,30 @@ deploy_to_s3() {
                     --region ${AWS_REGION} \
                     --cache-control "no-cache, no-store, must-revalidate" \
                     --content-type "text/yaml"
+                echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+            fi
+        done
+        # Upload JSON templates (Azure ARM)
+        for template in ${dist_dir}/templates/*.json; do
+            if [ -f "$template" ]; then
+                filename=$(basename "$template")
+                aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+                    --profile ${AWS_PROFILE} \
+                    --region ${AWS_REGION} \
+                    --cache-control "no-cache, no-store, must-revalidate" \
+                    --content-type "application/json"
+                echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+            fi
+        done
+        # Upload Bicep templates (Azure)
+        for template in ${dist_dir}/templates/*.bicep; do
+            if [ -f "$template" ]; then
+                filename=$(basename "$template")
+                aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+                    --profile ${AWS_PROFILE} \
+                    --region ${AWS_REGION} \
+                    --cache-control "no-cache, no-store, must-revalidate" \
+                    --content-type "text/plain"
                 echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
             fi
         done
