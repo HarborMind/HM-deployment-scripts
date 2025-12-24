@@ -368,6 +368,8 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     configure_provisioned_concurrency "hm-${ENVIRONMENT}-list-integrations"
                                     configure_provisioned_concurrency "hm-${ENVIRONMENT}-update-integration"
                                     configure_provisioned_concurrency "hm-${ENVIRONMENT}-catalog-findings"
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-update-tenant-config"
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-scan-submit-results" 2  # High concurrency for scan result submissions
                                     echo ""
 
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
