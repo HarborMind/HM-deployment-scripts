@@ -370,6 +370,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     configure_provisioned_concurrency "hm-${ENVIRONMENT}-catalog-findings"
                                     configure_provisioned_concurrency "hm-${ENVIRONMENT}-update-tenant-config"
                                     configure_provisioned_concurrency "hm-${ENVIRONMENT}-scan-submit-results" 2  # High concurrency for scan result submissions
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-m365-discover"  # M365 discovery endpoint
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-aws-discover"   # AWS discovery endpoint
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-m365-settings"  # M365 settings saving
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-m365-connect"   # M365 connection saving
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-user-management"  # Settings > Users tab
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-get-tenant-config"  # Settings > Scanner/Discovery config loading
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-api-clients"  # Settings > API Keys tab
+                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-sso-config"  # Settings > SSO tab
                                     echo ""
 
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
