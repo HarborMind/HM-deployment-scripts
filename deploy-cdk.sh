@@ -305,7 +305,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             echo -e "${BLUE}Phase 3: Data, CSPM, Assets, and Neptune${NC}"
             echo -e "${YELLOW}Note: CSPM creates cspm-findings table, Assets creates assets table for IAM/Bedrock discovery${NC}"
             echo -e "${YELLOW}      Neptune creates graph database for attack path analysis${NC}"
-            if ! cdk deploy Data HarborMind-${ENVIRONMENT}-CSPM HarborMind-${ENVIRONMENT}-Assets HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            if ! cdk deploy Data HarborMind-${ENVIRONMENT}-CSPM HarborMind-${ENVIRONMENT}-Assets HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} --concurrency 1 ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
