@@ -301,14 +301,21 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
-            # Phase 3: Data, CSPM, Assets, and Neptune (all read KMS key ARN from SSM - no stack dependency)
-            echo -e "${BLUE}Phase 3: Data, CSPM, Assets, and Neptune${NC}"
-            echo -e "${YELLOW}Note: CSPM creates cspm-findings table, Assets creates assets table for IAM/Bedrock discovery${NC}"
+            # Phase 3: Data, Assets, and Neptune (all read KMS key ARN from SSM - no stack dependency)
+            echo -e "${BLUE}Phase 3: Data, Assets, and Neptune${NC}"
+            echo -e "${YELLOW}Note: Assets creates assets table for IAM/Bedrock discovery${NC}"
             echo -e "${YELLOW}      Neptune creates graph database for attack path analysis${NC}"
-            if ! cdk deploy Data HarborMind-${ENVIRONMENT}-CSPM HarborMind-${ENVIRONMENT}-Assets HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} --concurrency 1 ${CDK_OPTIONS}; then
+            if ! cdk deploy Data HarborMind-${ENVIRONMENT}-Assets HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} --concurrency 1 ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
+                # Phase 3b: CSPM (depends on Data for scans table stream ARN in SSM)
+                echo -e "${BLUE}Phase 3b: CSPM${NC}"
+                echo -e "${YELLOW}Note: CSPM creates cspm-findings table and uses scans table stream for check triggering${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-CSPM -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    echo -e "${RED}❌ Phase 3b (CSPM) deployment failed${NC}"
+                    DEPLOYMENT_SUCCESS=false
+                else
                 # Phase 4: Lambda Functions and SearchData
                 echo -e "${BLUE}Phase 4: Lambda Functions and SearchData${NC}"
                 echo -e "${YELLOW}Note: Lambda Functions exports function ARNs to SSM, SearchData is isolated for independent lifecycle management${NC}"
@@ -422,6 +429,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                             fi
                         fi
                     fi
+                fi
                 fi
             fi
         fi
