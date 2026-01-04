@@ -316,6 +316,12 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                     echo -e "${RED}❌ Phase 3b (CSPM) deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
+                # NOTE: Shared layer is managed by CDK Foundation stack with Docker bundling
+                # This ensures ARM64 Linux binaries are built correctly for Lambda runtime
+                # The layer ARN is stored at: /${ENVIRONMENT}/lambda/layers/shared/arn
+                echo -e "${GREEN}✅ Using CDK-managed shared layer (Docker-bundled for ARM64)${NC}"
+                echo ""
+
                 # Phase 4: Lambda Functions and SearchData
                 echo -e "${BLUE}Phase 4: Lambda Functions and SearchData${NC}"
                 echo -e "${YELLOW}Note: Lambda Functions exports function ARNs to SSM, SearchData is isolated for independent lifecycle management${NC}"
@@ -370,22 +376,12 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     echo -e "${RED}❌ Phase 8 deployment failed${NC}"
                                     DEPLOYMENT_SUCCESS=false
                                 else
-                                    # Configure provisioned concurrency for latency-sensitive functions
-                                    echo -e "${BLUE}Configuring provisioned concurrency for latency-sensitive Lambda functions...${NC}"
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-dashboard-metrics"
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-list-integrations"
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-update-integration"
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-catalog-findings"
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-update-tenant-config"
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-scan-submit-results" 2  # High concurrency for scan result submissions
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-m365-discover"  # M365 discovery endpoint
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-aws-discover"   # AWS discovery endpoint
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-m365-settings"  # M365 settings saving
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-m365-connect"   # M365 connection saving
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-user-management"  # Settings > Users tab
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-get-tenant-config"  # Settings > Scanner/Discovery config loading
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-api-clients"  # Settings > API Keys tab
-                                    configure_provisioned_concurrency "hm-${ENVIRONMENT}-sso-config"  # Settings > SSO tab
+                                    # NOTE: Provisioned concurrency configuration is disabled because Lambda functions
+                                    # use CDK auto-generated names. To enable provisioned concurrency, either:
+                                    # 1. Add explicit functionName properties to Lambda constructs in CDK
+                                    # 2. Use SSM parameters to store function names and look them up here
+                                    # See: SaaS-infrastructure/cdk/lib/stacks/operations-stack.ts
+                                    echo -e "${YELLOW}Skipping provisioned concurrency (functions use auto-generated names)${NC}"
                                     echo ""
 
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
@@ -410,6 +406,36 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                         else
                                             echo -e "${YELLOW}⚠️  Could not find REST API ID, skipping deployment${NC}"
                                         fi
+
+                                        # Update Lambda functions to use the CDK-managed shared layer
+                                        # Layer ARN is stored by Foundation stack at: /${ENVIRONMENT}/lambda/layers/shared/arn
+                                        echo -e "${BLUE}Updating Lambda functions with CDK-managed shared layer...${NC}"
+                                        LAYER_ARN=$(aws ssm get-parameter --name "/${ENVIRONMENT}/lambda/layers/shared/arn" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+                                        if [ -n "$LAYER_ARN" ] && [ "$LAYER_ARN" != "None" ]; then
+                                            LAYER_VERSION=$(echo "$LAYER_ARN" | grep -oE '[0-9]+$')
+
+                                            # List of Lambda functions that use the shared layer but aren't in CDK stacks
+                                            # that already reference the layer (e.g., functions in Data/Operations stacks)
+                                            LAMBDA_FUNCTIONS=(
+                                                "graph-api"
+                                                "graph-query"
+                                                "relationship-builder"
+                                            )
+
+                                            for func in "${LAMBDA_FUNCTIONS[@]}"; do
+                                                if aws lambda get-function --function-name ${func} --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                                                    aws lambda update-function-configuration \
+                                                        --function-name ${func} \
+                                                        --layers ${LAYER_ARN} \
+                                                        --profile ${AWS_PROFILE} \
+                                                        --region ${AWS_REGION} >/dev/null 2>&1
+                                                    echo -e "${GREEN}  ✅ Updated ${func} to layer v${LAYER_VERSION}${NC}"
+                                                fi
+                                            done
+                                        else
+                                            echo -e "${YELLOW}⚠️  Could not find CDK-managed shared layer ARN, skipping Lambda updates${NC}"
+                                        fi
+                                        echo ""
 
                                         # Phase 10: SecurityInfrastructure
                                         echo -e "${BLUE}Phase 10: SecurityInfrastructure${NC}"
