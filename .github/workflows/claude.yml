@@ -1,0 +1,141 @@
+name: Claude Code
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      alert_number:
+        description: 'CodeQL alert number to fix'
+        required: false
+
+jobs:
+  # Auto code review on PRs
+  auto-review:
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          trigger_phrase: ""
+          prompt: |
+            Review this pull request for code quality and security issues.
+
+            Categorize findings by severity:
+            - 🔴 Critical: Security vulnerabilities, data loss risks
+            - 🟠 High: Bugs, missing error handling
+            - 🟡 Medium: Performance, maintainability
+            - 🟢 Low: Style, documentation
+
+            Provide constructive feedback. If the code looks good, say so briefly.
+            Post your review using: gh pr comment --body "your review"
+          claude_args: |
+            --allowedTools "Bash(gh pr:*),Read,Glob,Grep"
+
+  # @claude mention handling - can fix issues and commit when asked
+  claude:
+    if: |
+      github.event_name != 'workflow_dispatch' &&
+      github.event_name != 'pull_request' && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: |
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(git:*),Bash(gh pr:*),Bash(gh issue:*)"
+          additional_permissions: |
+            actions: read
+
+  # Fix CodeQL alerts
+  fix-codeql-alert:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.alert_number != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      security-events: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Fetch alert details
+        id: alert
+        run: |
+          # Strip # if present
+          ALERT_NUM="${{ github.event.inputs.alert_number }}"
+          ALERT_NUM="${ALERT_NUM#\#}"
+          
+          alert=$(gh api repos/${{ github.repository }}/code-scanning/alerts/${ALERT_NUM})
+          echo "rule_name=$(echo $alert | jq -r '.rule.name')" >> $GITHUB_OUTPUT
+          echo "rule_id=$(echo $alert | jq -r '.rule.id')" >> $GITHUB_OUTPUT
+          echo "rule_desc=$(echo $alert | jq -r '.rule.description')" >> $GITHUB_OUTPUT
+          echo "severity=$(echo $alert | jq -r '.rule.security_severity_level // .rule.severity')" >> $GITHUB_OUTPUT
+          echo "file_path=$(echo $alert | jq -r '.most_recent_instance.location.path')" >> $GITHUB_OUTPUT
+          echo "start_line=$(echo $alert | jq -r '.most_recent_instance.location.start_line')" >> $GITHUB_OUTPUT
+          echo "end_line=$(echo $alert | jq -r '.most_recent_instance.location.end_line')" >> $GITHUB_OUTPUT
+          echo "message=$(echo $alert | jq -r '.most_recent_instance.message.text')" >> $GITHUB_OUTPUT
+          echo "html_url=$(echo $alert | jq -r '.html_url')" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Claude to fix alert
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Fix CodeQL security alert #${{ github.event.inputs.alert_number }}
+            
+            **Rule:** ${{ steps.alert.outputs.rule_name }} (${{ steps.alert.outputs.rule_id }})
+            **Severity:** ${{ steps.alert.outputs.severity }}
+            **Description:** ${{ steps.alert.outputs.rule_desc }}
+            **File:** ${{ steps.alert.outputs.file_path }}
+            **Lines:** ${{ steps.alert.outputs.start_line }}-${{ steps.alert.outputs.end_line }}
+            **Issue:** ${{ steps.alert.outputs.message }}
+            **Alert URL:** ${{ steps.alert.outputs.html_url }}
+            
+            Instructions:
+            1. Read and analyze the vulnerable code in context
+            2. Implement a secure fix following OWASP best practices
+            3. Ensure the fix doesn't break existing functionality
+            4. Create a PR that references this alert
