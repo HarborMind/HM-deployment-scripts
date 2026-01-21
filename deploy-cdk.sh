@@ -295,6 +295,26 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
+        # Bootstrap VPC SSM parameter for dev environment (Foundation stack looks this up)
+        if [ "${ENVIRONMENT}" == "dev" ]; then
+            echo -e "${BLUE}Bootstrapping VPC SSM parameter for dev environment...${NC}"
+            # Check if parameter already exists
+            EXISTING_VPC_ID=$(aws ssm get-parameter --name "/${ENVIRONMENT}/infrastructure/vpc-id" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+            if [ -z "$EXISTING_VPC_ID" ] || [ "$EXISTING_VPC_ID" == "None" ]; then
+                # Create the VPC SSM parameter for dev environment
+                aws ssm put-parameter \
+                    --name "/${ENVIRONMENT}/infrastructure/vpc-id" \
+                    --value "vpc-0a99d3f090507d392" \
+                    --type String \
+                    --description "VPC ID for ${ENVIRONMENT} environment Foundation stack" \
+                    --profile ${AWS_PROFILE} \
+                    --region ${AWS_REGION} 2>/dev/null
+                echo -e "${GREEN}✅ VPC SSM parameter created: /${ENVIRONMENT}/infrastructure/vpc-id${NC}"
+            else
+                echo -e "${GREEN}✅ VPC SSM parameter already exists: ${EXISTING_VPC_ID}${NC}"
+            fi
+        fi
+
         # Phase 2: Foundation
         echo -e "${BLUE}Phase 2: Foundation${NC}"
         if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
@@ -376,12 +396,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     echo -e "${RED}❌ Phase 8 deployment failed${NC}"
                                     DEPLOYMENT_SUCCESS=false
                                 else
-                                    # NOTE: Provisioned concurrency configuration is disabled because Lambda functions
-                                    # use CDK auto-generated names. To enable provisioned concurrency, either:
-                                    # 1. Add explicit functionName properties to Lambda constructs in CDK
-                                    # 2. Use SSM parameters to store function names and look them up here
-                                    # See: SaaS-infrastructure/cdk/lib/stacks/operations-stack.ts
-                                    echo -e "${YELLOW}Skipping provisioned concurrency (functions use auto-generated names)${NC}"
+                                    # Configure provisioned concurrency for Neptune-dependent Lambda functions
+                                    # to reduce cold start delays that cause connection timeouts
+                                    echo -e "${BLUE}Configuring provisioned concurrency for Neptune-dependent Lambdas...${NC}"
+                                    configure_provisioned_concurrency "graph-api" 1
+                                    configure_provisioned_concurrency "relationship-builder" 1
                                     echo ""
 
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
@@ -418,7 +437,6 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                             # that already reference the layer (e.g., functions in Data/Operations stacks)
                                             LAMBDA_FUNCTIONS=(
                                                 "graph-api"
-                                                "graph-query"
                                                 "relationship-builder"
                                             )
 
