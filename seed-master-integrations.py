@@ -31,10 +31,11 @@ ASSETS_ENABLED_SERVICES = {
 }
 
 # Services with Data Discovery enabled (per requirements)
-# AWS: S3, DynamoDB, DocumentDB, EC2, EFS, FSx, Neptune, RDS, Redshift
+# AWS: S3, DynamoDB, EC2, EFS, FSx, Neptune, RDS, Redshift
 # M365: SharePoint, OneDrive
+# Note: DocumentDB removed - data scanning not yet implemented
 DATA_DISCOVERY_ENABLED_SERVICES = {
-    "s3", "dynamodb", "documentdb", "ec2", "efs", "fsx", "neptune", "rds", "redshift",
+    "s3", "dynamodb", "ec2", "efs", "fsx", "neptune", "rds", "redshift",
     "sharepoint", "onedrive"
 }
 
