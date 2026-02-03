@@ -44,6 +44,9 @@ AUTO_CONFIGURE=${AUTO_CONFIGURE:-true}
 # Domain configuration - can be overridden with environment variables
 BASE_DOMAIN=${BASE_DOMAIN:-harbormind.ai}
 
+# Blue-green deployment version (Unix timestamp for ordering)
+DEPLOY_VERSION="v$(date +%s)"
+
 # Script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
@@ -423,6 +426,27 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
         if [ -n "$APP_DISTRIBUTION_ID" ]; then
             echo -e "${GREEN}✅ Found app CloudFront distribution: ${APP_DISTRIBUTION_ID}${NC}"
         fi
+
+        # Get KeyValueStore ARN for blue-green deployment
+        APP_KVS_ARN=$(aws ssm get-parameter \
+            --name "/${ENVIRONMENT}/cloudfront/app/deployment-kvs/arn" \
+            --query 'Parameter.Value' --output text \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null || echo "")
+
+        if [ -n "$APP_KVS_ARN" ]; then
+            echo -e "${GREEN}✅ Found app KeyValueStore for blue-green deployment${NC}"
+            # Get current active version
+            APP_CURRENT_VERSION=$(aws cloudfront-keyvaluestore get-key \
+                --kvs-arn "$APP_KVS_ARN" \
+                --key "active-version" \
+                --query 'Value' --output text 2>/dev/null || echo "")
+            if [ -n "$APP_CURRENT_VERSION" ]; then
+                echo -e "${GREEN}   Current active version: ${APP_CURRENT_VERSION}${NC}"
+            fi
+        else
+            echo -e "${YELLOW}⚠️  App KeyValueStore not found - will use standard deployment${NC}"
+        fi
     fi
 
     # Admin resources - Try direct lookup first, then fallback to CloudFormation
@@ -756,94 +780,205 @@ if [[ "$DEPLOY_TYPE" == "admin" || "$DEPLOY_TYPE" == "both" ]]; then
     fi
 fi
 
-# Function to deploy to S3
+# Function to deploy to S3 (supports blue-green versioned deployment)
 deploy_to_s3() {
     local bucket=$1
     local type=$2
     local dist_dir=$3
-    
-    echo -e "${YELLOW}Deploying ${type} to S3 bucket: ${bucket}...${NC}"
-    
-    # Sync files to S3
-    aws s3 sync "${dist_dir}/" "s3://${bucket}/" \
-        --delete \
-        --profile ${AWS_PROFILE} \
-        --region ${AWS_REGION} \
-        --cache-control "public, max-age=31536000" \
-        --exclude "index.html" \
-        --exclude "config.js" \
-        --exclude "*.json" \
-        --exclude "*.xml"
-    
-    # Upload index.html without cache
-    aws s3 cp "${dist_dir}/index.html" "s3://${bucket}/index.html" \
-        --profile ${AWS_PROFILE} \
-        --region ${AWS_REGION} \
-        --cache-control "no-cache, no-store, must-revalidate" \
-        --content-type "text/html"
-    
-    # Upload config.js without cache (for dynamic configuration)
-    if [ -f "${dist_dir}/config.js" ]; then
-        aws s3 cp "${dist_dir}/config.js" "s3://${bucket}/config.js" \
+    local kvs_arn=$4  # Optional: KeyValueStore ARN for blue-green deployment
+
+    if [ -n "$kvs_arn" ]; then
+        # Blue-green deployment: upload to versioned directory
+        echo -e "${YELLOW}Deploying ${type} version ${DEPLOY_VERSION} to S3 bucket: ${bucket}...${NC}"
+        echo -e "${BLUE}Using blue-green deployment to /deployments/${DEPLOY_VERSION}/${NC}"
+
+        local deploy_path="deployments/${DEPLOY_VERSION}"
+
+        # Sync files to versioned directory (NO --delete to preserve other versions)
+        aws s3 sync "${dist_dir}/" "s3://${bucket}/${deploy_path}/" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} \
+            --cache-control "public, max-age=31536000, immutable" \
+            --exclude "index.html" \
+            --exclude "config.js" \
+            --exclude "*.json" \
+            --exclude "*.xml"
+
+        # Upload index.html without cache
+        aws s3 cp "${dist_dir}/index.html" "s3://${bucket}/${deploy_path}/index.html" \
             --profile ${AWS_PROFILE} \
             --region ${AWS_REGION} \
             --cache-control "no-cache, no-store, must-revalidate" \
-            --content-type "application/javascript"
-    fi
-    
-    # Upload other root files without heavy caching
-    for file in ${dist_dir}/*.json ${dist_dir}/*.xml ${dist_dir}/*.txt; do
-        if [ -f "$file" ]; then
-            filename=$(basename "$file")
-            aws s3 cp "$file" "s3://${bucket}/${filename}" \
+            --content-type "text/html"
+
+        # Upload config.js without cache
+        if [ -f "${dist_dir}/config.js" ]; then
+            aws s3 cp "${dist_dir}/config.js" "s3://${bucket}/${deploy_path}/config.js" \
                 --profile ${AWS_PROFILE} \
                 --region ${AWS_REGION} \
-                --cache-control "public, max-age=3600"
+                --cache-control "no-cache, no-store, must-revalidate" \
+                --content-type "application/javascript"
         fi
-    done
 
-    # Upload CloudFormation/ARM templates without cache (so updates are immediate)
-    if [ -d "${dist_dir}/templates" ]; then
-        echo -e "${YELLOW}Uploading deployment templates...${NC}"
-        # Upload YAML templates (AWS CloudFormation)
-        for template in ${dist_dir}/templates/*.yaml; do
-            if [ -f "$template" ]; then
-                filename=$(basename "$template")
-                aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+        # Upload other root files
+        for file in ${dist_dir}/*.json ${dist_dir}/*.xml ${dist_dir}/*.txt; do
+            if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                aws s3 cp "$file" "s3://${bucket}/${deploy_path}/${filename}" \
                     --profile ${AWS_PROFILE} \
                     --region ${AWS_REGION} \
-                    --cache-control "no-cache, no-store, must-revalidate" \
-                    --content-type "text/yaml"
-                echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+                    --cache-control "public, max-age=3600"
             fi
         done
-        # Upload JSON templates (Azure ARM)
-        for template in ${dist_dir}/templates/*.json; do
-            if [ -f "$template" ]; then
-                filename=$(basename "$template")
-                aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+
+        # Upload templates to versioned path
+        if [ -d "${dist_dir}/templates" ]; then
+            echo -e "${YELLOW}Uploading deployment templates...${NC}"
+            for template in ${dist_dir}/templates/*.yaml ${dist_dir}/templates/*.json ${dist_dir}/templates/*.bicep; do
+                if [ -f "$template" ]; then
+                    filename=$(basename "$template")
+                    content_type="text/plain"
+                    [[ "$filename" == *.yaml ]] && content_type="text/yaml"
+                    [[ "$filename" == *.json ]] && content_type="application/json"
+                    aws s3 cp "$template" "s3://${bucket}/${deploy_path}/templates/${filename}" \
+                        --profile ${AWS_PROFILE} \
+                        --region ${AWS_REGION} \
+                        --cache-control "no-cache, no-store, must-revalidate" \
+                        --content-type "$content_type"
+                    echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+                fi
+            done
+        fi
+
+        echo -e "${GREEN}✅ ${type} version ${DEPLOY_VERSION} deployed to S3 (blue-green)${NC}"
+    else
+        # Standard deployment to root (backward compatible)
+        echo -e "${YELLOW}Deploying ${type} to S3 bucket: ${bucket}...${NC}"
+        echo -e "${BLUE}Using standard deployment (blue-green not configured)${NC}"
+
+        # Sync files to S3
+        aws s3 sync "${dist_dir}/" "s3://${bucket}/" \
+            --delete \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} \
+            --cache-control "public, max-age=31536000" \
+            --exclude "index.html" \
+            --exclude "config.js" \
+            --exclude "*.json" \
+            --exclude "*.xml"
+
+        # Upload index.html without cache
+        aws s3 cp "${dist_dir}/index.html" "s3://${bucket}/index.html" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "text/html"
+
+        # Upload config.js without cache (for dynamic configuration)
+        if [ -f "${dist_dir}/config.js" ]; then
+            aws s3 cp "${dist_dir}/config.js" "s3://${bucket}/config.js" \
+                --profile ${AWS_PROFILE} \
+                --region ${AWS_REGION} \
+                --cache-control "no-cache, no-store, must-revalidate" \
+                --content-type "application/javascript"
+        fi
+
+        # Upload other root files without heavy caching
+        for file in ${dist_dir}/*.json ${dist_dir}/*.xml ${dist_dir}/*.txt; do
+            if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                aws s3 cp "$file" "s3://${bucket}/${filename}" \
                     --profile ${AWS_PROFILE} \
                     --region ${AWS_REGION} \
-                    --cache-control "no-cache, no-store, must-revalidate" \
-                    --content-type "application/json"
-                echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+                    --cache-control "public, max-age=3600"
             fi
         done
-        # Upload Bicep templates (Azure)
-        for template in ${dist_dir}/templates/*.bicep; do
-            if [ -f "$template" ]; then
-                filename=$(basename "$template")
-                aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
-                    --profile ${AWS_PROFILE} \
-                    --region ${AWS_REGION} \
-                    --cache-control "no-cache, no-store, must-revalidate" \
-                    --content-type "text/plain"
-                echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
-            fi
-        done
+
+        # Upload CloudFormation/ARM templates without cache (so updates are immediate)
+        if [ -d "${dist_dir}/templates" ]; then
+            echo -e "${YELLOW}Uploading deployment templates...${NC}"
+            # Upload YAML templates (AWS CloudFormation)
+            for template in ${dist_dir}/templates/*.yaml; do
+                if [ -f "$template" ]; then
+                    filename=$(basename "$template")
+                    aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+                        --profile ${AWS_PROFILE} \
+                        --region ${AWS_REGION} \
+                        --cache-control "no-cache, no-store, must-revalidate" \
+                        --content-type "text/yaml"
+                    echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+                fi
+            done
+            # Upload JSON templates (Azure ARM)
+            for template in ${dist_dir}/templates/*.json; do
+                if [ -f "$template" ]; then
+                    filename=$(basename "$template")
+                    aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+                        --profile ${AWS_PROFILE} \
+                        --region ${AWS_REGION} \
+                        --cache-control "no-cache, no-store, must-revalidate" \
+                        --content-type "application/json"
+                    echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+                fi
+            done
+            # Upload Bicep templates (Azure)
+            for template in ${dist_dir}/templates/*.bicep; do
+                if [ -f "$template" ]; then
+                    filename=$(basename "$template")
+                    aws s3 cp "$template" "s3://${bucket}/templates/${filename}" \
+                        --profile ${AWS_PROFILE} \
+                        --region ${AWS_REGION} \
+                        --cache-control "no-cache, no-store, must-revalidate" \
+                        --content-type "text/plain"
+                    echo -e "  ${GREEN}✓${NC} Uploaded templates/${filename}"
+                fi
+            done
+        fi
+
+        echo -e "${GREEN}✅ ${type} deployed to S3${NC}"
+    fi
+}
+
+# Function to switch traffic to new version (blue-green deployment)
+switch_traffic() {
+    local kvs_arn=$1
+    local type=$2
+    local current_version=$3
+
+    echo -e "${YELLOW}Switching ${type} traffic to version ${DEPLOY_VERSION}...${NC}"
+
+    # Get current ETag (required for KVS updates)
+    local etag=$(aws cloudfront-keyvaluestore describe-key-value-store \
+        --kvs-arn "${kvs_arn}" \
+        --query 'ETag' --output text \
+        --profile ${AWS_PROFILE})
+
+    # Store previous version first (for rollback)
+    if [ -n "$current_version" ]; then
+        aws cloudfront-keyvaluestore put-key \
+            --kvs-arn "${kvs_arn}" \
+            --key "previous-version" \
+            --value "${current_version}" \
+            --if-match "${etag}" \
+            --profile ${AWS_PROFILE} || true
+
+        # Get updated ETag
+        etag=$(aws cloudfront-keyvaluestore describe-key-value-store \
+            --kvs-arn "${kvs_arn}" \
+            --query 'ETag' --output text \
+            --profile ${AWS_PROFILE})
     fi
 
-    echo -e "${GREEN}✅ ${type} deployed to S3${NC}"
+    # Switch to new version (INSTANT - syncs globally in seconds)
+    aws cloudfront-keyvaluestore put-key \
+        --kvs-arn "${kvs_arn}" \
+        --key "active-version" \
+        --value "${DEPLOY_VERSION}" \
+        --if-match "${etag}" \
+        --profile ${AWS_PROFILE}
+
+    echo -e "${GREEN}✅ ${type} traffic switched: ${current_version:-none} -> ${DEPLOY_VERSION}${NC}"
+    echo -e "${BLUE}   Traffic switch is instant via KeyValueStore${NC}"
 }
 
 # Function to invalidate CloudFront
@@ -866,8 +1001,24 @@ invalidate_cloudfront() {
 
 # Deploy based on type
 if [[ "$DEPLOY_TYPE" == "app" || "$DEPLOY_TYPE" == "both" ]]; then
-    deploy_to_s3 "$APP_BUCKET" "Customer App" "${FRONTEND_APP_DIR}/dist"
-    invalidate_cloudfront "$APP_DISTRIBUTION_ID" "Customer App"
+    deploy_to_s3 "$APP_BUCKET" "Customer App" "${FRONTEND_APP_DIR}/dist" "$APP_KVS_ARN"
+
+    # Switch traffic if blue-green is enabled
+    if [ -n "$APP_KVS_ARN" ]; then
+        switch_traffic "$APP_KVS_ARN" "Customer App" "$APP_CURRENT_VERSION"
+        # Minimal invalidation for blue-green (only root paths, assets are versioned)
+        echo -e "${YELLOW}Creating minimal CloudFront invalidation for Customer App...${NC}"
+        INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id ${APP_DISTRIBUTION_ID} \
+            --paths "/" "/index.html" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} \
+            --query 'Invalidation.Id' \
+            --output text)
+        echo -e "${GREEN}✅ CloudFront invalidation created: ${INVALIDATION_ID}${NC}"
+    else
+        invalidate_cloudfront "$APP_DISTRIBUTION_ID" "Customer App"
+    fi
 fi
 
 if [[ "$DEPLOY_TYPE" == "admin" || "$DEPLOY_TYPE" == "both" ]]; then
@@ -938,8 +1089,26 @@ echo -e "  Customer API: ${GREEN}${API_URL}${NC}"
 echo -e "  Admin API: ${GREEN}${ADMIN_API_URL}${NC}"
 echo -e "  WebSocket: ${GREEN}${WEBSOCKET_API_URL}${NC}"
 echo ""
-echo -e "${YELLOW}Note:${NC} CloudFront invalidation may take a few minutes to complete."
-echo ""
+
+# Blue-green deployment info
+if [ -n "$APP_KVS_ARN" ]; then
+    echo -e "${YELLOW}Blue-Green Deployment:${NC}"
+    echo -e "  Version: ${GREEN}${DEPLOY_VERSION}${NC}"
+    echo -e "  Traffic switch: ${GREEN}Instant (KeyValueStore)${NC}"
+    echo -e "  Old version retention: ${GREEN}48 hours${NC}"
+    echo ""
+    echo -e "${YELLOW}Rollback command:${NC}"
+    echo -e "  aws cloudfront-keyvaluestore put-key \\"
+    echo -e "    --kvs-arn \"${APP_KVS_ARN}\" \\"
+    echo -e "    --key \"active-version\" \\"
+    echo -e "    --value \"${APP_CURRENT_VERSION:-<previous-version>}\" \\"
+    echo -e "    --if-match \"\$(aws cloudfront-keyvaluestore describe-key-value-store --kvs-arn \"${APP_KVS_ARN}\" --query 'ETag' --output text --profile ${AWS_PROFILE})\" \\"
+    echo -e "    --profile ${AWS_PROFILE}"
+    echo ""
+else
+    echo -e "${YELLOW}Note:${NC} CloudFront invalidation may take a few minutes to complete."
+    echo ""
+fi
 
 # Upload master classification patterns to S3
 echo ""
