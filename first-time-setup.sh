@@ -168,24 +168,167 @@ aws ec2 associate-route-table --route-table-id $PRIVATE_RT --subnet-id $PRIVATE_
     --profile $AWS_PROFILE --region $AWS_REGION > /dev/null
 echo -e "${GREEN}  Route table: ${PRIVATE_RT} → ${NAT_GW}${NC}"
 
-# Done
+# VPC done
 echo ""
 echo -e "${GREEN}VPC setup complete!${NC}"
-echo ""
-echo -e "${YELLOW}Resources created:${NC}"
 echo -e "  VPC:            ${GREEN}${VPC_ID}${NC}"
 echo -e "  Public Subnet:  ${GREEN}${PUBLIC_SUBNET}${NC}"
 echo -e "  Private Subnet: ${GREEN}${PRIVATE_SUBNET_A}${NC}"
 echo -e "  Private Subnet: ${GREEN}${PRIVATE_SUBNET_B}${NC}"
 echo -e "  NAT Gateway:    ${GREEN}${NAT_GW}${NC}"
 echo ""
-echo -e "${YELLOW}Next steps:${NC}"
-echo -e "1. Bootstrap CDK in the account:"
-echo -e "   ${BLUE}cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} --profile ${AWS_PROFILE}${NC}"
+
+# 7. Bootstrap CDK
+echo -e "${BLUE}7/9 Bootstrapping CDK...${NC}"
+if ! aws cloudformation describe-stacks --stack-name CDKToolkit --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+    cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} --profile ${AWS_PROFILE}
+    echo -e "${GREEN}  CDK bootstrapped${NC}"
+else
+    echo -e "${GREEN}  CDK already bootstrapped${NC}"
+fi
+
+# 8. Bootstrap VPC SSM parameter (needed by CDK stacks at synth time)
+echo -e "${BLUE}8/9 Bootstrapping VPC SSM parameter...${NC}"
+aws ssm put-parameter \
+    --name "/${ENVIRONMENT}/infrastructure/vpc-id" \
+    --value "${VPC_ID}" \
+    --type String \
+    --description "VPC ID for ${ENVIRONMENT} environment" \
+    --overwrite \
+    --profile ${AWS_PROFILE} \
+    --region ${AWS_REGION} 2>/dev/null
+echo -e "${GREEN}  /${ENVIRONMENT}/infrastructure/vpc-id = ${VPC_ID}${NC}"
+
+# 9. Deploy DNS stack and setup external DNS records
+echo -e "${BLUE}9/9 Deploying DNS stack and configuring certificates...${NC}"
 echo ""
-echo -e "2. Deploy HarborMind:"
-echo -e "   ${BLUE}VPC_ID=${VPC_ID} AWS_PROFILE=${AWS_PROFILE} ./deploy-cdk.sh ${ENVIRONMENT} customer${NC}"
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+CUSTOMER_CDK_DIR="${SCRIPT_DIR}/../SaaS-infrastructure/cdk"
+DNS_STACK_NAME="HarborMind-${ENVIRONMENT}-DNS"
+
+# Install CDK deps and build
+cd "$CUSTOMER_CDK_DIR"
+if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}Installing CDK dependencies...${NC}"
+    npm install
+fi
+echo -e "${YELLOW}Building TypeScript...${NC}"
+npm run build
+
+# Bootstrap shared layer SSM placeholder (required for cdk synth)
+EXISTING_LAYER_ARN=$(aws ssm get-parameter --name "/${ENVIRONMENT}/lambda/layers/shared/arn" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+if [ -z "$EXISTING_LAYER_ARN" ] || [ "$EXISTING_LAYER_ARN" == "None" ]; then
+    aws ssm put-parameter \
+        --name "/${ENVIRONMENT}/lambda/layers/shared/arn" \
+        --value "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:layer:shared:1" \
+        --type String \
+        --description "Shared Lambda layer ARN for ${ENVIRONMENT} (placeholder)" \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} 2>/dev/null
+fi
+
+# Synth
+echo -e "${YELLOW}Synthesizing CloudFormation...${NC}"
+cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} > /dev/null
+
+# Deploy DNS stack in background so we can poll for records
+echo -e "${YELLOW}Deploying DNS stack (background)...${NC}"
+cdk deploy ${DNS_STACK_NAME} -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} --require-approval never &
+CDK_DNS_PID=$!
+
+# Poll until the hosted zone is created
+echo -e "${YELLOW}Waiting for hosted zone...${NC}"
+HZ_ID=""
+for i in $(seq 1 90); do
+    HZ_ID=$(aws route53 list-hosted-zones-by-name --dns-name "${ENVIRONMENT}.harbormind.ai" --max-items 1 \
+        --query "HostedZones[?Name=='${ENVIRONMENT}.harbormind.ai.'].Id" --output text \
+        --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+    if [ -n "$HZ_ID" ] && [ "$HZ_ID" != "None" ]; then
+        break
+    fi
+    sleep 5
+done
+
+if [ -z "$HZ_ID" ] || [ "$HZ_ID" == "None" ]; then
+    echo -e "${RED}Timed out waiting for hosted zone. Check CloudFormation console.${NC}"
+    wait $CDK_DNS_PID 2>/dev/null
+    exit 1
+fi
+
+# Get NS records
 echo ""
-echo -e "3. Add DNS delegation (in the root harbormind.ai account):"
-echo -e "   Create NS records for ${ENVIRONMENT}.harbormind.ai pointing to the"
-echo -e "   hosted zone created by the DNS stack in account ${AWS_ACCOUNT_ID}"
+echo -e "${GREEN}========================================================${NC}"
+echo -e "${GREEN}  Add these DNS records to your provider (e.g. Cloudflare)${NC}"
+echo -e "${GREEN}========================================================${NC}"
+echo ""
+echo -e "${YELLOW}1. NS Records — Delegate ${ENVIRONMENT}.harbormind.ai:${NC}"
+echo ""
+NS_RECORDS=$(aws route53 list-resource-record-sets --hosted-zone-id "$HZ_ID" \
+    --query "ResourceRecordSets[?Type=='NS' && Name=='${ENVIRONMENT}.harbormind.ai.'].ResourceRecords[].Value" \
+    --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null)
+echo -e "   ${BLUE}Type:${NC}  NS"
+echo -e "   ${BLUE}Name:${NC}  ${ENVIRONMENT}"
+for NS in $NS_RECORDS; do
+    echo -e "   ${BLUE}Value:${NC} ${GREEN}${NS}${NC}"
+done
+
+# Poll for ACM validation CNAME records from CloudFormation events
+echo ""
+echo -e "${YELLOW}Waiting for certificate validation records...${NC}"
+VALIDATION_RECORDS=""
+for i in $(seq 1 90); do
+    VALIDATION_RECORDS=$(aws cloudformation describe-stack-events \
+        --stack-name ${DNS_STACK_NAME} \
+        --profile ${AWS_PROFILE} --region ${AWS_REGION} \
+        --query "StackEvents[?ResourceType=='AWS::CertificateManager::Certificate' && contains(to_string(ResourceStatusReason), 'Content of DNS Record')].ResourceStatusReason" \
+        --output text 2>/dev/null || echo "")
+    RECORD_COUNT=$(echo "$VALIDATION_RECORDS" | grep -c "Content of DNS Record" 2>/dev/null || echo "0")
+    if [ "$RECORD_COUNT" -ge 3 ]; then
+        break
+    fi
+    sleep 5
+done
+
+if [ -n "$VALIDATION_RECORDS" ] && [ "$VALIDATION_RECORDS" != "None" ]; then
+    echo ""
+    echo -e "${YELLOW}2. CNAME Records — Certificate validation (proxy OFF / DNS only):${NC}"
+    echo ""
+    echo "$VALIDATION_RECORDS" | tr '\t' '\n' | while IFS= read -r line; do
+        # macOS-compatible parsing (no grep -P)
+        CNAME_NAME=$(echo "$line" | sed -n 's/.*Name: *\([^,]*\),.*/\1/p' | sed 's/\.$//')
+        CNAME_VALUE=$(echo "$line" | sed -n 's/.*Value: *\([^}]*\)}.*/\1/p' | sed 's/\.$//')
+        if [ -n "$CNAME_NAME" ] && [ -n "$CNAME_VALUE" ]; then
+            SHORT_NAME=$(echo "$CNAME_NAME" | sed "s/\.harbormind\.ai$//")
+            echo -e "   ${BLUE}CNAME:${NC} ${SHORT_NAME}"
+            echo -e "   ${BLUE}Value:${NC} ${GREEN}${CNAME_VALUE}${NC}"
+            echo ""
+        fi
+    done
+fi
+
+echo -e "${GREEN}========================================================${NC}"
+echo ""
+echo -e "${YELLOW}Add the above records to your DNS provider now.${NC}"
+echo -e "${YELLOW}Certificates will validate once DNS propagates (usually 1-5 min).${NC}"
+echo ""
+read -p "Press Enter once you've added the DNS records..." </dev/tty
+echo ""
+
+# Wait for DNS stack to finish
+echo -e "${YELLOW}Waiting for DNS stack to complete...${NC}"
+if wait $CDK_DNS_PID; then
+    echo -e "${GREEN}DNS stack deployed successfully!${NC}"
+else
+    echo -e "${RED}DNS stack deployment failed. You may need to re-run deploy-cdk.sh after DNS propagates.${NC}"
+fi
+
+echo ""
+echo -e "${GREEN}========================================================${NC}"
+echo -e "${GREEN}  First-time setup complete!${NC}"
+echo -e "${GREEN}========================================================${NC}"
+echo ""
+echo -e "${YELLOW}Deploy HarborMind:${NC}"
+echo -e "  ${BLUE}VPC_ID=${VPC_ID} AWS_PROFILE=${AWS_PROFILE} ./deploy-cdk.sh ${ENVIRONMENT} customer${NC}"
+echo ""
+echo -e "${YELLOW}Note: deploy-cdk.sh will skip the DNS stack if it's already deployed.${NC}"
