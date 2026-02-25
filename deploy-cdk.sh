@@ -73,26 +73,19 @@ if [[ ! "$DEPLOY_TYPE" =~ ^(platform|customer|both)$ ]]; then
     exit 1
 fi
 
-# Check AWS Profile configuration
-echo -e "${YELLOW}Checking AWS Profile configuration...${NC}"
-CURRENT_PROFILE=$(aws configure get aws_access_key_id --profile ${AWS_PROFILE} 2>/dev/null)
-if [ -z "$CURRENT_PROFILE" ]; then
-    echo -e "${RED}❌ AWS Profile '${AWS_PROFILE}' is not configured.${NC}"
+# Check AWS credentials (works with both static credentials and SSO profiles)
+echo -e "${YELLOW}Checking AWS credentials...${NC}"
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile ${AWS_PROFILE} --query Account --output text 2>/dev/null)
+if [ -z "$AWS_ACCOUNT_ID" ] || [ "$AWS_ACCOUNT_ID" == "None" ]; then
+    echo -e "${RED}❌ Unable to authenticate with AWS profile '${AWS_PROFILE}'.${NC}"
     echo -e "${YELLOW}Available profiles:${NC}"
     aws configure list-profiles 2>/dev/null || echo "No profiles found"
     echo ""
-    echo -e "${YELLOW}To set up a profile, run:${NC}"
-    echo -e "  aws configure --profile ${AWS_PROFILE}"
+    echo -e "${YELLOW}For SSO profiles, run:${NC}"
+    echo -e "  aws sso login --profile ${AWS_PROFILE}"
     echo ""
     echo -e "${YELLOW}Or specify a different profile:${NC}"
     echo -e "  AWS_PROFILE=your-profile $0 ${ENVIRONMENT} ${DEPLOY_TYPE}"
-    exit 1
-fi
-
-# Get AWS Account ID for verification
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile ${AWS_PROFILE} --query Account --output text 2>/dev/null)
-if [ -z "$AWS_ACCOUNT_ID" ]; then
-    echo -e "${RED}❌ Unable to get AWS account ID. Check your AWS credentials.${NC}"
     exit 1
 fi
 
@@ -283,6 +276,23 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} --profile ${AWS_PROFILE}
     fi
 
+    # Bootstrap shared layer SSM parameter (required for cdk synth - valueFromLookup)
+    echo -e "${BLUE}Checking shared layer SSM parameter...${NC}"
+    EXISTING_LAYER_ARN=$(aws ssm get-parameter --name "/${ENVIRONMENT}/lambda/layers/shared/arn" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+    if [ -z "$EXISTING_LAYER_ARN" ] || [ "$EXISTING_LAYER_ARN" == "None" ]; then
+        echo -e "${YELLOW}Creating placeholder shared layer SSM parameter to unblock cdk synth...${NC}"
+        aws ssm put-parameter \
+            --name "/${ENVIRONMENT}/lambda/layers/shared/arn" \
+            --value "arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:layer:shared:1" \
+            --type String \
+            --description "Shared Lambda layer ARN for ${ENVIRONMENT} (placeholder - Foundation stack will publish real value)" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null
+        echo -e "${GREEN}✅ Placeholder shared layer SSM parameter created${NC}"
+    else
+        echo -e "${GREEN}✅ Shared layer SSM parameter already exists${NC}"
+    fi
+
     # Synthesize CloudFormation
     echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
     cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
@@ -321,6 +331,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
+            # Clear cached shared layer SSM lookup so subsequent deploys pick up the real ARN
+            echo -e "${BLUE}Clearing cached shared layer SSM lookup from cdk.context.json...${NC}"
+            npx cdk context --reset "ssm:account=${AWS_ACCOUNT_ID}:parameterName=/${ENVIRONMENT}/lambda/layers/shared/arn:region=${AWS_REGION}" --force 2>/dev/null || true
+            echo -e "${GREEN}✅ CDK context cache cleared for shared layer ARN${NC}"
+
             # Phase 3: Data, Assets, and Neptune (all read KMS key ARN from SSM - no stack dependency)
             echo -e "${BLUE}Phase 3: Data, Assets, and Neptune${NC}"
             echo -e "${YELLOW}Note: Assets creates assets table for IAM/Bedrock discovery${NC}"
