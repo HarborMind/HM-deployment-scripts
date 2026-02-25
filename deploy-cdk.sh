@@ -323,6 +323,45 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             --region ${AWS_REGION} 2>/dev/null
     fi
 
+    # Check for CodeConnection (needed for CICD stack)
+    echo -e "${BLUE}Checking AWS CodeConnection for GitHub...${NC}"
+    CODE_CONNECTION_ID=""
+
+    # Try to find an existing CodeConnection for GitHub
+    EXISTING_CONNECTION=$(aws codeconnections list-connections \
+        --provider-type-filter GitHub \
+        --max-results 1 \
+        --query 'Connections[?Status==`AVAILABLE`] | [0].ConnectionArn' \
+        --output text \
+        --profile ${AWS_PROFILE} \
+        --region ${AWS_REGION} 2>/dev/null || echo "")
+
+    if [ -n "$EXISTING_CONNECTION" ] && [ "$EXISTING_CONNECTION" != "None" ]; then
+        # Extract connection ID from ARN (format: arn:aws:codeconnections:region:account:connection/ID)
+        CODE_CONNECTION_ID=$(echo "$EXISTING_CONNECTION" | awk -F'/' '{print $NF}')
+        echo -e "${GREEN}✅ Found existing CodeConnection: ${CODE_CONNECTION_ID}${NC}"
+    else
+        echo -e "${YELLOW}No CodeConnection found. CICD stack requires an AWS CodeConnection to GitHub.${NC}"
+        echo -e "${YELLOW}Create one at: https://console.aws.amazon.com/codesuite/settings/connections${NC}"
+        echo -e "${YELLOW}Steps:${NC}"
+        echo -e "${YELLOW}  1. Click 'Create connection'${NC}"
+        echo -e "${YELLOW}  2. Select 'GitHub' as the provider${NC}"
+        echo -e "${YELLOW}  3. Name it 'harbormind-github-${ENVIRONMENT}'${NC}"
+        echo -e "${YELLOW}  4. Click 'Connect to GitHub' and authorize${NC}"
+        echo -e "${YELLOW}  5. Copy the Connection ID (last part of the ARN)${NC}"
+        echo ""
+        echo -n "Enter CodeConnection ID (or press Enter to skip CICD): "
+        read CODE_CONNECTION_ID
+        echo ""
+
+        if [ -z "$CODE_CONNECTION_ID" ]; then
+            echo -e "${YELLOW}⚠️  No CodeConnection provided - CICD stack will not deploy${NC}"
+        else
+            echo -e "${GREEN}✅ Using CodeConnection: ${CODE_CONNECTION_ID}${NC}"
+        fi
+    fi
+    echo ""
+
     EXISTING_AL_NAME=$(aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/auditlogs/name" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
     if [ -z "$EXISTING_AL_NAME" ] || [ "$EXISTING_AL_NAME" == "None" ]; then
         echo -e "${YELLOW}Creating placeholder auditlogs/name SSM parameter...${NC}"
@@ -464,6 +503,12 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                     echo -e "${RED}❌ Phase 3b (CSPM) deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
+                # Phase 3c: Activity (depends on Data for activity monitoring tables)
+                echo -e "${BLUE}Phase 3c: Activity${NC}"
+                echo -e "${YELLOW}Note: Activity creates activity monitoring infrastructure${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Activity -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    echo -e "${YELLOW}⚠️  Phase 3c (Activity) deployment failed — continuing without activity monitoring${NC}"
+                fi
                 # NOTE: Shared layer is managed by CDK Foundation stack with Docker bundling
                 # This ensures ARM64 Linux binaries are built correctly for Lambda runtime
                 # The layer ARN is stored at: /${ENVIRONMENT}/lambda/layers/shared/arn
@@ -480,7 +525,15 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                     # Phase 5: API Gateway Core (creates SSM parameters that Analytics needs)
                     echo -e "${BLUE}Phase 5: API Gateway Core${NC}"
                     echo -e "${YELLOW}Note: API Gateway Core creates the base REST API and must deploy before route stacks${NC}"
-                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+
+                    # Check if WAF is deployed (SecurityInfrastructure from Phase 10)
+                    API_GW_CONTEXT_FLAGS="-c environment=${ENVIRONMENT}"
+                    if aws ssm get-parameter --name "/${ENVIRONMENT}/security/api-waf/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                        API_GW_CONTEXT_FLAGS="${API_GW_CONTEXT_FLAGS} -c waf-deployed=true"
+                        echo -e "${GREEN}  WAF: detected${NC}"
+                    fi
+
+                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore ${API_GW_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                         echo -e "${RED}❌ Phase 5 deployment failed${NC}"
                         DEPLOYMENT_SUCCESS=false
                     else
@@ -563,6 +616,19 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     configure_provisioned_concurrency "relationship-builder" 1
                                     echo ""
 
+                                    # Phase 8a: M365 (depends on Operations for scan-submit Lambda ARN)
+                                    echo -e "${BLUE}Phase 8a: M365${NC}"
+                                    echo -e "${YELLOW}Note: M365 creates Microsoft 365 integration and discovery Lambda functions${NC}"
+                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-M365 -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                        echo -e "${YELLOW}⚠️  Phase 8a (M365) deployment failed — continuing without M365 integration${NC}"
+                                    else
+                                        # Phase 8b: Re-deploy Operations to wire up M365 discover function
+                                        echo -e "${BLUE}Phase 8b: Re-deploy Operations (wire up M365 integration)${NC}"
+                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} -c m365-deployed=true --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                            echo -e "${YELLOW}⚠️  Phase 8b (Operations re-deploy) failed — scheduled discovery may not handle M365${NC}"
+                                        fi
+                                    fi
+
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
                                     echo -e "${BLUE}Phase 9: API Routes${NC}"
                                     echo -e "${YELLOW}Note: Deploying route stacks for Orchestrators, Data, Config, and Search${NC}"
@@ -621,11 +687,34 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                             echo -e "${RED}❌ Phase 10 deployment failed${NC}"
                                             DEPLOYMENT_SUCCESS=false
                                         else
+                                            # Phase 10a: Re-deploy API Gateway Core to associate WAF
+                                            echo -e "${BLUE}Phase 10a: Re-deploy API Gateway Core (associate WAF)${NC}"
+                                            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore -c environment=${ENVIRONMENT} -c waf-deployed=true --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                                echo -e "${YELLOW}⚠️  Phase 10a (API Gateway WAF association) failed${NC}"
+                                            fi
+
                                             # Phase 11: Frontend
                                             echo -e "${BLUE}Phase 11: Frontend${NC}"
                                             if ! cdk deploy HarborMind-${ENVIRONMENT}-Frontend -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                                                 echo -e "${RED}❌ Phase 11 deployment failed${NC}"
                                                 DEPLOYMENT_SUCCESS=false
+                                            else
+                                                # Phase 12: CICD (optional - only if CodeConnection is available)
+                                                if [ -n "${CODE_CONNECTION_ID}" ]; then
+                                                    echo -e "${BLUE}Phase 12: CICD${NC}"
+                                                    echo -e "${YELLOW}Note: CICD creates CodeBuild projects for automated deployments${NC}"
+                                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-CICD -c environment=${ENVIRONMENT} -c code-connection-id=${CODE_CONNECTION_ID} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                                        echo -e "${YELLOW}⚠️  Phase 12 (CICD) deployment failed — continuing without CI/CD infrastructure${NC}"
+                                                    else
+                                                        echo -e "${GREEN}✅ CICD stack deployed successfully${NC}"
+                                                        echo -e "${YELLOW}Note: CodeBuild webhooks must be configured manually:${NC}"
+                                                        echo -e "${YELLOW}  1. Go to CodeBuild console${NC}"
+                                                        echo -e "${YELLOW}  2. For each project, click 'Update webhook settings'${NC}"
+                                                        echo -e "${YELLOW}  3. Enable webhook and select 'PUSH' and 'PULL_REQUEST_MERGED' events${NC}"
+                                                    fi
+                                                else
+                                                    echo -e "${YELLOW}⚠️  Skipping CICD stack deployment (no CodeConnection provided)${NC}"
+                                                fi
                                             fi
                                         fi
                                     fi
