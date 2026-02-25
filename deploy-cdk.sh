@@ -337,6 +337,51 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
     echo -e "${GREEN}✅ DynamoDB table SSM parameters ready${NC}"
 
+    # Bootstrap VPC SSM parameter (required by cdk synth — valueFromLookup resolves at synth time)
+    echo -e "${BLUE}Bootstrapping VPC SSM parameter for ${ENVIRONMENT} environment...${NC}"
+    # Resolve VPC ID: env var > known fallback > auto-discover > error
+    RESOLVED_VPC_ID="${VPC_ID:-}"
+    if [ -z "$RESOLVED_VPC_ID" ]; then
+        case "$ENVIRONMENT" in
+            dev)     RESOLVED_VPC_ID="vpc-0a99d3f090507d392" ;;
+            staging) RESOLVED_VPC_ID="vpc-0a50c9b073975739a" ;;
+            prod)    RESOLVED_VPC_ID="vpc-0b12512ca2ff8d232" ;;
+            *)
+                # Try to discover a non-default VPC in the account
+                RESOLVED_VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=false" --query "Vpcs[0].VpcId" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+                if [ -z "$RESOLVED_VPC_ID" ] || [ "$RESOLVED_VPC_ID" == "None" ]; then
+                    echo -e "${RED}❌ VPC_ID env var required for environment: ${ENVIRONMENT}${NC}"
+                    echo -e "${YELLOW}Usage: VPC_ID=vpc-0abc123 $0 ${ENVIRONMENT} ${DEPLOY_TYPE}${NC}"
+                    exit 1
+                fi
+                ;;
+        esac
+    fi
+    # Check if parameter already exists with the correct value
+    EXISTING_VPC_ID=$(aws ssm get-parameter --name "/${ENVIRONMENT}/infrastructure/vpc-id" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+    if [ -z "$EXISTING_VPC_ID" ] || [ "$EXISTING_VPC_ID" == "None" ]; then
+        aws ssm put-parameter \
+            --name "/${ENVIRONMENT}/infrastructure/vpc-id" \
+            --value "${RESOLVED_VPC_ID}" \
+            --type String \
+            --description "VPC ID for ${ENVIRONMENT} environment" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null
+        echo -e "${GREEN}✅ VPC SSM parameter created: /${ENVIRONMENT}/infrastructure/vpc-id = ${RESOLVED_VPC_ID}${NC}"
+    elif [ "$EXISTING_VPC_ID" != "$RESOLVED_VPC_ID" ] && [ -n "${VPC_ID:-}" ]; then
+        aws ssm put-parameter \
+            --name "/${ENVIRONMENT}/infrastructure/vpc-id" \
+            --value "${RESOLVED_VPC_ID}" \
+            --type String \
+            --description "VPC ID for ${ENVIRONMENT} environment" \
+            --overwrite \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null
+        echo -e "${GREEN}✅ VPC SSM parameter updated: /${ENVIRONMENT}/infrastructure/vpc-id = ${RESOLVED_VPC_ID}${NC}"
+    else
+        echo -e "${GREEN}✅ VPC SSM parameter already exists: ${EXISTING_VPC_ID}${NC}"
+    fi
+
     # Synthesize CloudFormation
     echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
     cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
@@ -349,51 +394,6 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
-        # Bootstrap VPC SSM parameter (Foundation stack and other stacks look this up)
-        echo -e "${BLUE}Bootstrapping VPC SSM parameter for ${ENVIRONMENT} environment...${NC}"
-        # Resolve VPC ID: env var > known fallback > auto-discover > error
-        RESOLVED_VPC_ID="${VPC_ID:-}"
-        if [ -z "$RESOLVED_VPC_ID" ]; then
-            case "$ENVIRONMENT" in
-                dev)     RESOLVED_VPC_ID="vpc-0a99d3f090507d392" ;;
-                staging) RESOLVED_VPC_ID="vpc-0a50c9b073975739a" ;;
-                prod)    RESOLVED_VPC_ID="vpc-0b12512ca2ff8d232" ;;
-                *)
-                    # Try to discover the default VPC in the account
-                    RESOLVED_VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=false" --query "Vpcs[0].VpcId" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
-                    if [ -z "$RESOLVED_VPC_ID" ] || [ "$RESOLVED_VPC_ID" == "None" ]; then
-                        echo -e "${RED}❌ VPC_ID env var required for environment: ${ENVIRONMENT}${NC}"
-                        echo -e "${YELLOW}Usage: VPC_ID=vpc-0abc123 $0 ${ENVIRONMENT} ${DEPLOY_TYPE}${NC}"
-                        exit 1
-                    fi
-                    ;;
-            esac
-        fi
-        # Check if parameter already exists with the correct value
-        EXISTING_VPC_ID=$(aws ssm get-parameter --name "/${ENVIRONMENT}/infrastructure/vpc-id" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
-        if [ -z "$EXISTING_VPC_ID" ] || [ "$EXISTING_VPC_ID" == "None" ]; then
-            aws ssm put-parameter \
-                --name "/${ENVIRONMENT}/infrastructure/vpc-id" \
-                --value "${RESOLVED_VPC_ID}" \
-                --type String \
-                --description "VPC ID for ${ENVIRONMENT} environment" \
-                --profile ${AWS_PROFILE} \
-                --region ${AWS_REGION} 2>/dev/null
-            echo -e "${GREEN}✅ VPC SSM parameter created: /${ENVIRONMENT}/infrastructure/vpc-id = ${RESOLVED_VPC_ID}${NC}"
-        elif [ "$EXISTING_VPC_ID" != "$RESOLVED_VPC_ID" ] && [ -n "${VPC_ID:-}" ]; then
-            aws ssm put-parameter \
-                --name "/${ENVIRONMENT}/infrastructure/vpc-id" \
-                --value "${RESOLVED_VPC_ID}" \
-                --type String \
-                --description "VPC ID for ${ENVIRONMENT} environment" \
-                --overwrite \
-                --profile ${AWS_PROFILE} \
-                --region ${AWS_REGION} 2>/dev/null
-            echo -e "${GREEN}✅ VPC SSM parameter updated: /${ENVIRONMENT}/infrastructure/vpc-id = ${RESOLVED_VPC_ID}${NC}"
-        else
-            echo -e "${GREEN}✅ VPC SSM parameter already exists: ${EXISTING_VPC_ID}${NC}"
-        fi
-
         # Phase 2: Foundation
         echo -e "${BLUE}Phase 2: Foundation${NC}"
         if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
