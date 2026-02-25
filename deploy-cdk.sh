@@ -388,6 +388,19 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
     echo ""
 
+    # Remove bootstrapped SSM parameters before deploying the stacks that create them
+    # via CloudFormation. CloudFormation's EarlyValidation::ResourceExistenceCheck rejects
+    # changesets that CREATE AWS::SSM::Parameter resources when a parameter with the same
+    # name already exists outside CloudFormation. Cached values in cdk.context.json are
+    # sufficient for subsequent synths.
+    echo -e "${BLUE}Cleaning up bootstrapped SSM parameters for first-time deployment...${NC}"
+    if ! aws cloudformation describe-stacks --stack-name HarborMind-${ENVIRONMENT}-Foundation --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+        echo -e "${YELLOW}Foundation stack not yet deployed — removing bootstrapped shared layer param${NC}"
+        aws ssm delete-parameter --name "/${ENVIRONMENT}/lambda/layers/shared/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || true
+    else
+        echo -e "${GREEN}✅ Foundation stack already exists — skipping cleanup${NC}"
+    fi
+
     # Phase 1: DNS
     echo -e "${BLUE}Phase 1: DNS${NC}"
     if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
@@ -404,6 +417,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             echo -e "${BLUE}Clearing cached shared layer SSM lookup from cdk.context.json...${NC}"
             npx cdk context --reset "ssm:account=${AWS_ACCOUNT_ID}:parameterName=/${ENVIRONMENT}/lambda/layers/shared/arn:region=${AWS_REGION}" --force 2>/dev/null || true
             echo -e "${GREEN}✅ CDK context cache cleared for shared layer ARN${NC}"
+
+            # Remove bootstrapped DynamoDB SSM params before DataStack creates them via CloudFormation
+            if ! aws cloudformation describe-stacks --stack-name Data --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                echo -e "${YELLOW}Data stack not yet deployed — removing bootstrapped DynamoDB params${NC}"
+                aws ssm delete-parameter --name "/${ENVIRONMENT}/dynamodb/tables/tenantusers/name" --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || true
+                aws ssm delete-parameter --name "/${ENVIRONMENT}/dynamodb/tables/tenantusers/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || true
+                aws ssm delete-parameter --name "/${ENVIRONMENT}/dynamodb/tables/auditlogs/name" --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || true
+            fi
 
             # Phase 3: Data, Assets, and Neptune (all read KMS key ARN from SSM - no stack dependency)
             echo -e "${BLUE}Phase 3: Data, Assets, and Neptune${NC}"
