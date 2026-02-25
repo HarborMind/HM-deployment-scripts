@@ -173,10 +173,10 @@ deploy_cdk() {
     echo -e "${YELLOW}Deploying stacks...${NC}"
     if [ -n "$stack_name" ]; then
         # Deploy specific stack
-        cdk deploy "$stack_name" --profile ${AWS_PROFILE} ${CDK_OPTIONS}
+        cdk deploy "$stack_name" -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}
     else
         # Deploy all stacks
-        cdk deploy --all --profile ${AWS_PROFILE} ${CDK_OPTIONS}
+        cdk deploy --all -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}
     fi
     
     if [ $? -eq 0 ]; then
@@ -426,14 +426,19 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 aws ssm delete-parameter --name "/${ENVIRONMENT}/dynamodb/tables/auditlogs/name" --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || true
             fi
 
-            # Phase 3: Data, Assets, and Neptune (all read KMS key ARN from SSM - no stack dependency)
-            echo -e "${BLUE}Phase 3: Data, Assets, and Neptune${NC}"
-            echo -e "${YELLOW}Note: Assets creates assets table for IAM/Bedrock discovery${NC}"
-            echo -e "${YELLOW}      Neptune creates graph database for attack path analysis${NC}"
-            if ! cdk deploy Data HarborMind-${ENVIRONMENT}-Assets HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} --concurrency 1 ${CDK_OPTIONS}; then
-                echo -e "${RED}❌ Phase 3 deployment failed${NC}"
+            # Phase 3: Data (creates DynamoDB tables and SSM params needed by later stacks)
+            # Note: Assets is deployed after API Gateway Core (Phase 5a) because it imports API Gateway SSM params
+            echo -e "${BLUE}Phase 3: Data${NC}"
+            if ! cdk deploy Data -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                echo -e "${RED}❌ Phase 3 (Data) deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
+                # Phase 3-Neptune: Deploy independently so failure doesn't block the pipeline
+                echo -e "${BLUE}Phase 3: Neptune${NC}"
+                echo -e "${YELLOW}Note: Neptune creates graph database for attack path analysis${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    echo -e "${YELLOW}⚠️  Neptune deployment failed — continuing with remaining stacks${NC}"
+                fi
                 # Phase 3a: Re-deploy Foundation so Cognito Lambda triggers pick up real
                 # DynamoDB table names/ARNs now that DataStack has published them to SSM.
                 # Without this, the triggers would have placeholder env vars until the
@@ -497,6 +502,38 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                             echo -e "${GREEN}✅ OpenSearch VPC endpoint stored in SSM Parameter Store${NC}"
                         else
                             echo -e "${YELLOW}⚠️  OpenSearch domain not deployed in VPC or not found, skipping VPC endpoint bootstrap${NC}"
+                        fi
+
+                        # Phase 5a: Assets (depends on API Gateway SSM params from Phase 5 and Data SSM params from Phase 3)
+                        echo -e "${BLUE}Phase 5a: Assets${NC}"
+                        echo -e "${YELLOW}Note: Assets creates assets table and adds API Gateway routes for asset management${NC}"
+                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Assets -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                            echo -e "${RED}❌ Phase 5a (Assets) deployment failed${NC}"
+                            DEPLOYMENT_SUCCESS=false
+                        else
+
+                        # Phase 5b: Re-deploy Data to pick up Neptune, CSPM, and Assets SSM params
+                        # On first deploy, Data omits these integrations because the params don't exist yet.
+                        # Now that CSPM (Phase 3b) and Assets (Phase 5a) have deployed, re-deploy to wire them up.
+                        echo -e "${BLUE}Phase 5b: Re-deploy Data (wire up Neptune/CSPM/Assets integrations)${NC}"
+
+                        # Detect which optional stacks have deployed by checking SSM params
+                        DATA_CONTEXT_FLAGS="-c environment=${ENVIRONMENT}"
+                        if aws ssm get-parameter --name "/harbormind/${ENVIRONMENT}/neptune/cluster-endpoint" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                            DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c neptune-deployed=true"
+                            echo -e "${GREEN}  Neptune: detected${NC}"
+                        fi
+                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/resource-metadata/table-arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                            DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c cspm-deployed=true"
+                            echo -e "${GREEN}  CSPM: detected${NC}"
+                        fi
+                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/assets/table-arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                            DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c assets-deployed=true"
+                            echo -e "${GREEN}  Assets: detected${NC}"
+                        fi
+
+                        if ! cdk deploy Data ${DATA_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                            echo -e "${YELLOW}⚠️  Phase 5b (Data re-deploy) failed — stream processors may not be fully wired${NC}"
                         fi
 
                         # Phase 6: SecurityAuth
@@ -595,6 +632,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                 fi
                             fi
                         fi
+                        fi
                     fi
                 fi
                 fi
@@ -606,7 +644,7 @@ fi
 
 if [[ "$DEPLOY_TYPE" == "platform" || "$DEPLOY_TYPE" == "both" ]]; then
     echo -e "${YELLOW}🏢 Deploying Platform Admin CDK...${NC}"
-    if ! deploy_cdk "$PLATFORM_CDK_DIR" "" "Platform Admin Infrastructure"; then
+    if ! deploy_cdk "$PLATFORM_CDK_DIR" "HarborMind-${ENVIRONMENT}-PlatformAdmin" "Platform Admin Infrastructure"; then
         DEPLOYMENT_SUCCESS=false
     fi
 fi
