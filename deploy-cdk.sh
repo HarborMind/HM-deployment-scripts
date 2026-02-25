@@ -294,6 +294,49 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${GREEN}✅ Shared layer SSM parameter already exists${NC}"
     fi
 
+    # Bootstrap DynamoDB table SSM parameters (required by Foundation → MultiTenantAuth)
+    # These are created by DataStack (Phase 3) but Foundation (Phase 2) references them.
+    # Only create if they don't exist — won't overwrite real values on subsequent deployments.
+    echo -e "${BLUE}Checking DynamoDB table SSM parameters...${NC}"
+
+    EXISTING_TU_NAME=$(aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/tenantusers/name" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+    if [ -z "$EXISTING_TU_NAME" ] || [ "$EXISTING_TU_NAME" == "None" ]; then
+        echo -e "${YELLOW}Creating placeholder tenantusers/name SSM parameter...${NC}"
+        aws ssm put-parameter \
+            --name "/${ENVIRONMENT}/dynamodb/tables/tenantusers/name" \
+            --value "placeholder-tenantusers" \
+            --type String \
+            --description "Tenant users table name for ${ENVIRONMENT} (placeholder - DataStack will publish real value)" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null
+    fi
+
+    EXISTING_TU_ARN=$(aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/tenantusers/arn" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+    if [ -z "$EXISTING_TU_ARN" ] || [ "$EXISTING_TU_ARN" == "None" ]; then
+        echo -e "${YELLOW}Creating placeholder tenantusers/arn SSM parameter...${NC}"
+        aws ssm put-parameter \
+            --name "/${ENVIRONMENT}/dynamodb/tables/tenantusers/arn" \
+            --value "arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/placeholder-tenantusers" \
+            --type String \
+            --description "Tenant users table ARN for ${ENVIRONMENT} (placeholder - DataStack will publish real value)" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null
+    fi
+
+    EXISTING_AL_NAME=$(aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/auditlogs/name" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+    if [ -z "$EXISTING_AL_NAME" ] || [ "$EXISTING_AL_NAME" == "None" ]; then
+        echo -e "${YELLOW}Creating placeholder auditlogs/name SSM parameter...${NC}"
+        aws ssm put-parameter \
+            --name "/${ENVIRONMENT}/dynamodb/tables/auditlogs/name" \
+            --value "placeholder-auditlogs" \
+            --type String \
+            --description "Audit logs table name for ${ENVIRONMENT} (placeholder - DataStack will publish real value)" \
+            --profile ${AWS_PROFILE} \
+            --region ${AWS_REGION} 2>/dev/null
+    fi
+
+    echo -e "${GREEN}✅ DynamoDB table SSM parameters ready${NC}"
+
     # Synthesize CloudFormation
     echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
     cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
@@ -370,6 +413,16 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 echo -e "${RED}❌ Phase 3 deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
+                # Phase 3a: Re-deploy Foundation so Cognito Lambda triggers pick up real
+                # DynamoDB table names/ARNs now that DataStack has published them to SSM.
+                # Without this, the triggers would have placeholder env vars until the
+                # next full deployment.
+                echo -e "${BLUE}Phase 3a: Re-deploy Foundation (resolve real DynamoDB SSM values)${NC}"
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    echo -e "${RED}❌ Phase 3a (Foundation re-deploy) failed${NC}"
+                    DEPLOYMENT_SUCCESS=false
+                else
+
                 # Phase 3b: CSPM (depends on Data for scans table stream ARN in SSM)
                 echo -e "${BLUE}Phase 3b: CSPM${NC}"
                 echo -e "${YELLOW}Note: CSPM creates cspm-findings table and uses scans table stream for check triggering${NC}"
@@ -514,6 +567,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                             fi
                         fi
                     fi
+                fi
                 fi
                 fi
             fi
