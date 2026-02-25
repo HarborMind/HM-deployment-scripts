@@ -418,6 +418,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 # Without this, the triggers would have placeholder env vars until the
                 # next full deployment.
                 echo -e "${BLUE}Phase 3a: Re-deploy Foundation (resolve real DynamoDB SSM values)${NC}"
+
+                # Clear cached DynamoDB SSM lookups so cdk synth picks up real values
+                echo -e "${BLUE}Clearing cached DynamoDB SSM lookups from cdk.context.json...${NC}"
+                npx cdk context --reset "ssm:account=${AWS_ACCOUNT_ID}:parameterName=/${ENVIRONMENT}/dynamodb/tables/tenantusers/name:region=${AWS_REGION}" --force 2>/dev/null || true
+                npx cdk context --reset "ssm:account=${AWS_ACCOUNT_ID}:parameterName=/${ENVIRONMENT}/dynamodb/tables/tenantusers/arn:region=${AWS_REGION}" --force 2>/dev/null || true
+                npx cdk context --reset "ssm:account=${AWS_ACCOUNT_ID}:parameterName=/${ENVIRONMENT}/dynamodb/tables/auditlogs/name:region=${AWS_REGION}" --force 2>/dev/null || true
+                echo -e "${GREEN}✅ CDK context cache cleared for DynamoDB table SSM params${NC}"
+
                 if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 3a (Foundation re-deploy) failed${NC}"
                     DEPLOYMENT_SUCCESS=false
