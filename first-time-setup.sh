@@ -45,6 +45,7 @@ VPC_CIDR=${VPC_CIDR:-10.1.0.0/16}
 
 AZ_A="${AWS_REGION}a"
 AZ_B="${AWS_REGION}b"
+AZ_C="${AWS_REGION}c"
 
 # Check AWS credentials
 echo -e "${YELLOW}Checking AWS credentials...${NC}"
@@ -107,6 +108,7 @@ if [ "$CREATE_VPC" == "true" ]; then
     PUBLIC_CIDR="${CIDR_PREFIX}.0.0/24"
     PRIVATE_A_CIDR="${CIDR_PREFIX}.1.0/24"
     PRIVATE_B_CIDR="${CIDR_PREFIX}.2.0/24"
+    PRIVATE_C_CIDR="${CIDR_PREFIX}.3.0/24"
 elif [ -n "$EXISTING_VPC_ID" ]; then
     MODE="existing"
     echo -e "${GREEN}HarborMind First-Time Setup (Use Existing VPC)${NC}"
@@ -124,6 +126,7 @@ if [ "$MODE" == "create" ]; then
     echo -e "  Public:    ${YELLOW}${PUBLIC_CIDR}${NC} (${AZ_A})"
     echo -e "  Private A: ${YELLOW}${PRIVATE_A_CIDR}${NC} (${AZ_A})"
     echo -e "  Private B: ${YELLOW}${PRIVATE_B_CIDR}${NC} (${AZ_B})"
+    echo -e "  Private C: ${YELLOW}${PRIVATE_C_CIDR}${NC} (${AZ_C})"
 else
     echo -e "VPC ID:      ${YELLOW}${EXISTING_VPC_ID}${NC}"
 fi
@@ -196,6 +199,13 @@ if [ "$MODE" == "create" ]; then
         --query 'Subnet.SubnetId' --output text \
         --profile $AWS_PROFILE --region $AWS_REGION)
     echo -e "${GREEN}  Private B: ${PRIVATE_SUBNET_B} (${AZ_B})${NC}"
+
+    PRIVATE_SUBNET_C=$(aws ec2 create-subnet \
+        --vpc-id $VPC_ID --cidr-block $PRIVATE_C_CIDR --availability-zone $AZ_C \
+        --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=harbormind-${ENVIRONMENT}-private-c},{Key=aws-cdk:subnet-type,Value=Private}]" \
+        --query 'Subnet.SubnetId' --output text \
+        --profile $AWS_PROFILE --region $AWS_REGION)
+    echo -e "${GREEN}  Private C: ${PRIVATE_SUBNET_C} (${AZ_C})${NC}"
 
     # 4. Public route table → Internet Gateway
     echo -e "${BLUE}4/6 Creating public route table...${NC}"
@@ -291,6 +301,45 @@ else
         echo -e "${GREEN}  Private subnet B: ${PRIVATE_SUBNET_B} (${AZ_B})${NC}"
     fi
 
+    # Check for third private subnet (required for ElastiCache Serverless)
+    PRIVATE_SUBNET_C=$(aws ec2 describe-subnets \
+        --filters "Name=vpc-id,Values=${VPC_ID}" "Name=availability-zone,Values=${AZ_C}" \
+        --query 'Subnets[?SubnetId!=`'"${PUBLIC_SUBNET}"'`] | [0].SubnetId' --output text \
+        --profile $AWS_PROFILE --region $AWS_REGION 2>/dev/null || echo "")
+
+    if [ -z "$PRIVATE_SUBNET_C" ] || [ "$PRIVATE_SUBNET_C" == "None" ]; then
+        echo -e "${YELLOW}  Warning: No private subnet found in ${AZ_C}${NC}"
+        echo -e "${YELLOW}  Note: ElastiCache Serverless requires 3 AZs - creating subnet in ${AZ_C}${NC}"
+
+        # Get VPC CIDR to derive a new subnet CIDR
+        VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids $VPC_ID \
+            --query 'Vpcs[0].CidrBlock' --output text \
+            --profile $AWS_PROFILE --region $AWS_REGION 2>/dev/null || echo "")
+
+        if [ -n "$VPC_CIDR" ] && [ "$VPC_CIDR" != "None" ]; then
+            # Derive a new subnet CIDR (use .3.0/24 if VPC is /16, or find available range)
+            CIDR_PREFIX=$(echo "$VPC_CIDR" | cut -d'.' -f1-2)
+            PRIVATE_C_CIDR="${CIDR_PREFIX}.3.0/24"
+
+            # Create private subnet in AZ C
+            PRIVATE_SUBNET_C=$(aws ec2 create-subnet \
+                --vpc-id $VPC_ID --cidr-block $PRIVATE_C_CIDR --availability-zone $AZ_C \
+                --tag-specifications "ResourceType=subnet,Tags=[{Key=Name,Value=harbormind-${ENVIRONMENT}-private-c},{Key=aws-cdk:subnet-type,Value=Private}]" \
+                --query 'Subnet.SubnetId' --output text \
+                --profile $AWS_PROFILE --region $AWS_REGION 2>/dev/null || echo "")
+
+            if [ -n "$PRIVATE_SUBNET_C" ] && [ "$PRIVATE_SUBNET_C" != "None" ]; then
+                echo -e "${GREEN}  Created private subnet C: ${PRIVATE_SUBNET_C} (${AZ_C}, ${PRIVATE_C_CIDR})${NC}"
+            else
+                echo -e "${YELLOW}  Warning: Failed to create subnet in ${AZ_C} - ElastiCache may fail${NC}"
+            fi
+        else
+            echo -e "${YELLOW}  Warning: Could not determine VPC CIDR - skipping subnet creation${NC}"
+        fi
+    else
+        echo -e "${GREEN}  Private subnet C: ${PRIVATE_SUBNET_C} (${AZ_C})${NC}"
+    fi
+
     # 4. Ensure public route table exists with IGW route
     echo -e "${BLUE}4/6 Checking public route table...${NC}"
     if [ -z "$PUBLIC_RT" ] || [ "$PUBLIC_RT" == "None" ]; then
@@ -364,6 +413,10 @@ else
     fi
     if [ -n "$PRIVATE_SUBNET_B" ] && [ "$PRIVATE_SUBNET_B" != "None" ]; then
         aws ec2 associate-route-table --route-table-id $PRIVATE_RT --subnet-id $PRIVATE_SUBNET_B \
+            --profile $AWS_PROFILE --region $AWS_REGION > /dev/null 2>&1 || true
+    fi
+    if [ -n "$PRIVATE_SUBNET_C" ] && [ "$PRIVATE_SUBNET_C" != "None" ]; then
+        aws ec2 associate-route-table --route-table-id $PRIVATE_RT --subnet-id $PRIVATE_SUBNET_C \
             --profile $AWS_PROFILE --region $AWS_REGION > /dev/null 2>&1 || true
     fi
     echo -e "${GREEN}  Created private route table: ${PRIVATE_RT} → ${NAT_GW}${NC}"
