@@ -64,26 +64,31 @@ echo -e "Base Domain: ${YELLOW}${BASE_DOMAIN}${NC}"
 echo -e "Auto Configure: ${YELLOW}${AUTO_CONFIGURE}${NC}"
 echo ""
 
-# Check AWS Profile configuration
+# Check AWS Profile configuration (supports both SSO and static credentials)
 echo -e "${YELLOW}Checking AWS Profile configuration...${NC}"
-CURRENT_PROFILE=$(aws configure get aws_access_key_id --profile ${AWS_PROFILE} 2>/dev/null)
-if [ -z "$CURRENT_PROFILE" ]; then
+
+# Check if profile exists in config
+if ! aws configure list-profiles 2>/dev/null | grep -q "^${AWS_PROFILE}$"; then
     echo -e "${RED}❌ AWS Profile '${AWS_PROFILE}' is not configured.${NC}"
     echo -e "${YELLOW}Available profiles:${NC}"
     aws configure list-profiles 2>/dev/null || echo "No profiles found"
     echo ""
     echo -e "${YELLOW}To set up a profile, run:${NC}"
     echo -e "  aws configure --profile ${AWS_PROFILE}"
+    echo -e "${YELLOW}Or for SSO:${NC}"
+    echo -e "  aws configure sso --profile ${AWS_PROFILE}"
     echo ""
     echo -e "${YELLOW}Or specify a different profile:${NC}"
     echo -e "  AWS_PROFILE=your-profile ./deploy-frontend-split.sh ${ENVIRONMENT} ${DEPLOY_TYPE}"
     exit 1
 fi
 
-# Get AWS Account ID for verification
+# Verify credentials work (supports both SSO and static credentials)
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --profile ${AWS_PROFILE} --query Account --output text 2>/dev/null)
 if [ -z "$AWS_ACCOUNT_ID" ]; then
     echo -e "${RED}❌ Unable to get AWS account ID. Check your AWS credentials.${NC}"
+    echo -e "${YELLOW}If using SSO, you may need to login:${NC}"
+    echo -e "  aws sso login --profile ${AWS_PROFILE}"
     exit 1
 fi
 
@@ -273,33 +278,39 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
     echo -e "${YELLOW}Checking required CloudFormation stacks...${NC}"
     
     MISSING_STACKS=()
-    
+
     # Foundation stack (required for customer app)
-    if ! stack_exists "HarborMind-${ENVIRONMENT}-Foundation"; then
-        MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-Foundation (provides customer user pool)")
-    else
-        echo -e "${GREEN}✓${NC} Foundation stack found"
+    if [[ "$DEPLOY_TYPE" == "app" || "$DEPLOY_TYPE" == "both" ]]; then
+        if ! stack_exists "HarborMind-${ENVIRONMENT}-Foundation"; then
+            MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-Foundation (provides customer user pool)")
+        else
+            echo -e "${GREEN}✓${NC} Foundation stack found"
+        fi
     fi
-    
-    # Platform Admin stack (required for admin app)
-    if ! stack_exists "HarborMind-${ENVIRONMENT}-PlatformAdmin"; then
-        MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-PlatformAdmin (provides admin user pool and S3 bucket)")
-    else
-        echo -e "${GREEN}✓${NC} Platform Admin stack found"
+
+    # Platform Admin stack (required for admin app only)
+    if [[ "$DEPLOY_TYPE" == "admin" || "$DEPLOY_TYPE" == "both" ]]; then
+        if ! stack_exists "HarborMind-${ENVIRONMENT}-PlatformAdmin"; then
+            MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-PlatformAdmin (provides admin user pool and S3 bucket)")
+        else
+            echo -e "${GREEN}✓${NC} Platform Admin stack found"
+        fi
     fi
-    
+
     # API Gateway Core stack (required for both) - Note: ApiGateway was split into ApiGatewayCore + ApiRoutes-* stacks
     if ! stack_exists "HarborMind-${ENVIRONMENT}-ApiGatewayCore"; then
         MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-ApiGatewayCore (provides API endpoints)")
     else
         echo -e "${GREEN}✓${NC} API Gateway Core stack found"
     fi
-    
-    # Frontend stack (required for customer app)
-    if ! stack_exists "HarborMind-${ENVIRONMENT}-Frontend"; then
-        MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-Frontend (provides customer S3 bucket)")
-    else
-        echo -e "${GREEN}✓${NC} Frontend stack found"
+
+    # Frontend stack (required for customer app only)
+    if [[ "$DEPLOY_TYPE" == "app" || "$DEPLOY_TYPE" == "both" ]]; then
+        if ! stack_exists "HarborMind-${ENVIRONMENT}-Frontend"; then
+            MISSING_STACKS+=("HarborMind-${ENVIRONMENT}-Frontend (provides customer S3 bucket)")
+        else
+            echo -e "${GREEN}✓${NC} Frontend stack found"
+        fi
     fi
     
     if [ ${#MISSING_STACKS[@]} -gt 0 ]; then
