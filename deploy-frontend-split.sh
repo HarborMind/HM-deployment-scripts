@@ -417,8 +417,14 @@ if [[ "$AUTO_CONFIGURE" == "true" ]]; then
     echo -e "${YELLOW}Looking up S3 buckets and CloudFront distributions...${NC}"
 
     # App resources - Try direct lookup first, then fallback to CloudFormation
-    # Note: The customer app bucket is named "harbormind-${ENV}-s3-frontend" (not "-app-frontend")
+    # Note: Bucket naming varies by environment:
+    #   - Original: harbormind-${ENV}-s3-frontend
+    #   - Alternate: harbormind-${ENV}-frontend (used by dev2, etc.)
     APP_BUCKET=$(get_s3_bucket_by_pattern "harbormind-${ENVIRONMENT}-s3-frontend")
+    if [ -z "$APP_BUCKET" ]; then
+        # Try alternate naming pattern (without -s3-)
+        APP_BUCKET=$(get_s3_bucket_by_pattern "harbormind-${ENVIRONMENT}-frontend")
+    fi
     if [ -z "$APP_BUCKET" ]; then
         echo -e "${YELLOW}⚠️  App bucket not found by pattern, trying CloudFormation...${NC}"
         APP_BUCKET=$(get_stack_output "HarborMind-${ENVIRONMENT}-Frontend" "AppBucketName")
