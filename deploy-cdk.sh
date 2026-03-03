@@ -331,7 +331,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
     EXISTING_CONNECTION=$(aws codeconnections list-connections \
         --provider-type-filter GitHub \
         --max-results 1 \
-        --query 'Connections[?Status==`AVAILABLE`] | [0].ConnectionArn' \
+        --query "Connections[?ConnectionStatus=='AVAILABLE'] | [0].ConnectionArn" \
         --output text \
         --profile ${AWS_PROFILE} \
         --region ${AWS_REGION} 2>/dev/null || echo "")
