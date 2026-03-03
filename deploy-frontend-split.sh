@@ -637,6 +637,23 @@ window._HARBORMIND_CONFIG_ = {
 };
 EOF
         echo -e "${GREEN}✅ Customer app dynamic config (config.js) created${NC}"
+
+        # Also write config.json as fallback
+        cat > "${FRONTEND_APP_DIR}/public/config.json" <<EOF
+{
+  "environment": "${ENVIRONMENT}",
+  "region": "${AWS_REGION}",
+  "userPoolId": "${USER_POOL_ID}",
+  "userPoolClientId": "${USER_POOL_CLIENT_ID}",
+  "identityPoolId": "${IDENTITY_POOL_ID:-}",
+  "cognitoDomain": "${CUSTOMER_COGNITO_DOMAIN}",
+  "apiUrl": "${API_URL}",
+  "websocketUrl": "${WEBSOCKET_API_URL:-}",
+  "appName": "HarborMind",
+  "appVersion": "1.0.0"
+}
+EOF
+        echo -e "${GREEN}✅ Customer app fallback config (config.json) created${NC}"
     fi
     
     # Generate files for admin portal
