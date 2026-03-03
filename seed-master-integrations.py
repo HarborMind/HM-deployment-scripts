@@ -362,8 +362,7 @@ def verify_table(environment: str):
 def main():
     parser = argparse.ArgumentParser(description='Seed master integrations table')
     parser.add_argument('--environment', '-e', required=True,
-                       choices=['dev', 'staging', 'prod'],
-                       help='Environment to seed')
+                       help='Environment to seed (e.g. dev, dev2, staging, prod)')
     parser.add_argument('--dry-run', action='store_true',
                        help='Print actions without writing to DynamoDB')
     parser.add_argument('--verify', action='store_true',
