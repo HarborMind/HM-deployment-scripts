@@ -40,15 +40,19 @@ ENVIRONMENT=${1:-dev}
 DEPLOY_TYPE=${2:-both}
 CDK_OPTIONS=${@:3}
 AWS_REGION=${AWS_REGION:-us-east-1}
-AWS_PROFILE=${AWS_PROFILE:-default}
+AWS_PROFILE=${AWS_PROFILE:-dev-sso}
+
+# Export for CDK's internal AWS SDK calls (needed for context lookups like valueFromLookup)
+export AWS_PROFILE
+export AWS_REGION
 
 # Script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
 
 # CDK directories
-PLATFORM_CDK_DIR="${PROJECT_ROOT}/../HarborMind-Platform-Admin/HM-platform-admin-infrastructure"
-CUSTOMER_CDK_DIR="${PROJECT_ROOT}/SaaS-infrastructure/cdk"
+PLATFORM_CDK_DIR="${PROJECT_ROOT}/HarborMind-Platform-Admin/HM-platform-admin-infrastructure"
+CUSTOMER_CDK_DIR="${PROJECT_ROOT}/HarborMind-SaaS/SaaS-infrastructure/cdk"
 
 echo -e "${GREEN}🚀 HarborMind CDK Deployment Script${NC}"
 echo -e "Environment: ${YELLOW}${ENVIRONMENT}${NC}"
@@ -91,6 +95,17 @@ if [ -z "$AWS_ACCOUNT_ID" ] || [ "$AWS_ACCOUNT_ID" == "None" ]; then
 fi
 
 echo -e "${GREEN}✅ Using AWS Account: ${AWS_ACCOUNT_ID}${NC}"
+
+# Export SSO credentials as environment variables for CDK
+# CDK has issues with SSO profiles when stacks have explicit env.account set
+# This converts the SSO session to static credentials that CDK can use
+echo -e "${YELLOW}Exporting credentials for CDK...${NC}"
+eval "$(aws configure export-credentials --profile ${AWS_PROFILE} --format env 2>/dev/null)" || true
+if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+    echo -e "${GREEN}✅ Credentials exported for CDK${NC}"
+else
+    echo -e "${YELLOW}⚠️  Could not export credentials, CDK will use profile directly${NC}"
+fi
 echo ""
 
 # Function to check if command exists
@@ -576,11 +591,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                             DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c neptune-deployed=true"
                             echo -e "${GREEN}  Neptune: detected${NC}"
                         fi
-                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/resource-metadata/table-arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
                             DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c cspm-deployed=true"
                             echo -e "${GREEN}  CSPM: detected${NC}"
                         fi
-                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/assets/table-arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/assets/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
                             DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c assets-deployed=true"
                             echo -e "${GREEN}  Assets: detected${NC}"
                         fi
