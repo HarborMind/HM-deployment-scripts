@@ -626,7 +626,15 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                 # Phase 8: Operations (creates Lambda functions needed by API Routes)
                                 echo -e "${BLUE}Phase 8: Operations${NC}"
                                 echo -e "${YELLOW}Note: Operations creates Lambda functions (ScanManagement, CatalogManagement, AwsAccountManagement) needed by API Routes${NC}"
-                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+
+                                # Detect if CSPM has been deployed for resource-metadata integration
+                                OPS_CONTEXT_FLAGS="-c environment=${ENVIRONMENT}"
+                                if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                                    OPS_CONTEXT_FLAGS="${OPS_CONTEXT_FLAGS} -c cspm-deployed=true"
+                                    echo -e "${GREEN}  CSPM: detected - enabling resource-metadata integration${NC}"
+                                fi
+
+                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                                     echo -e "${RED}❌ Phase 8 deployment failed${NC}"
                                     DEPLOYMENT_SUCCESS=false
                                 else
@@ -645,7 +653,8 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     else
                                         # Phase 8b: Re-deploy Operations to wire up M365 discover function
                                         echo -e "${BLUE}Phase 8b: Re-deploy Operations (wire up M365 integration)${NC}"
-                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} -c m365-deployed=true --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                        # Re-use OPS_CONTEXT_FLAGS (includes cspm-deployed if detected) and add m365-deployed
+                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_CONTEXT_FLAGS} -c m365-deployed=true --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                                             echo -e "${YELLOW}⚠️  Phase 8b (Operations re-deploy) failed — scheduled discovery may not handle M365${NC}"
                                         fi
                                     fi
