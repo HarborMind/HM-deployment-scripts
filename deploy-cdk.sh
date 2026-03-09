@@ -42,6 +42,12 @@ CDK_OPTIONS=${@:3}
 AWS_REGION=${AWS_REGION:-us-east-1}
 AWS_PROFILE=${AWS_PROFILE:-dev-sso}
 
+# Auto-approve CDK deployments (skip confirmation prompts)
+# Override by passing --require-approval broadening in CDK_OPTIONS
+if [[ ! "$CDK_OPTIONS" =~ "--require-approval" ]]; then
+    CDK_OPTIONS="--require-approval never ${CDK_OPTIONS}"
+fi
+
 # Export for CDK's internal AWS SDK calls (needed for context lookups like valueFromLookup)
 export AWS_PROFILE
 export AWS_REGION
