@@ -458,7 +458,7 @@ echo -e "${BLUE}9/9 Deploying DNS stack and configuring certificates...${NC}"
 echo ""
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-CUSTOMER_CDK_DIR="${SCRIPT_DIR}/../SaaS-infrastructure/cdk"
+CUSTOMER_CDK_DIR="${SCRIPT_DIR}/../HarborMind-SaaS/SaaS-infrastructure/cdk"
 DNS_STACK_NAME="HarborMind-${ENVIRONMENT}-DNS"
 
 # Install CDK deps and build

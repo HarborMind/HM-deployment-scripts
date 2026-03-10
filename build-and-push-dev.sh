@@ -23,7 +23,7 @@ POSTGRES_REPO="${REPO_PREFIX}/postgres-ecs"
 LIGHTHOUSE_REPO="${REPO_PREFIX}/lighthouse"
 
 # Local model path (relative to HarborMind root)
-LIGHTHOUSE_MODEL_PATH="models/lighthouse-models/qwen2.5-7b-instruct-q4_k_m.gguf"
+LIGHTHOUSE_MODEL_PATH="models/lighthouse-models/llama-3.1-8b-harbormind-q4_k_m.gguf"
 
 # Colors for output
 RED='\033[0;31m'
