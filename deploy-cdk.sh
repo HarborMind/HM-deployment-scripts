@@ -40,15 +40,31 @@ ENVIRONMENT=${1:-dev}
 DEPLOY_TYPE=${2:-both}
 CDK_OPTIONS=${@:3}
 AWS_REGION=${AWS_REGION:-us-east-1}
-AWS_PROFILE=${AWS_PROFILE:-default}
+AWS_PROFILE=${AWS_PROFILE:-dev-sso}
+
+# Auto-approve CDK deployments (skip confirmation prompts)
+# Override by passing --require-approval broadening in CDK_OPTIONS
+if [[ ! "$CDK_OPTIONS" =~ "--require-approval" ]]; then
+    CDK_OPTIONS="--require-approval never ${CDK_OPTIONS}"
+fi
+
+# Enable parallel stack deployment (respects dependencies)
+# Override by passing --concurrency N in CDK_OPTIONS
+if [[ ! "$CDK_OPTIONS" =~ "--concurrency" ]]; then
+    CDK_OPTIONS="--concurrency 5 ${CDK_OPTIONS}"
+fi
+
+# Export for CDK's internal AWS SDK calls (needed for context lookups like valueFromLookup)
+export AWS_PROFILE
+export AWS_REGION
 
 # Script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
 
 # CDK directories
-PLATFORM_CDK_DIR="${PROJECT_ROOT}/../HarborMind-Platform-Admin/HM-platform-admin-infrastructure"
-CUSTOMER_CDK_DIR="${PROJECT_ROOT}/SaaS-infrastructure/cdk"
+PLATFORM_CDK_DIR="${PROJECT_ROOT}/HarborMind-Platform-Admin/HM-platform-admin-infrastructure"
+CUSTOMER_CDK_DIR="${PROJECT_ROOT}/HarborMind-SaaS/SaaS-infrastructure/cdk"
 
 echo -e "${GREEN}🚀 HarborMind CDK Deployment Script${NC}"
 echo -e "Environment: ${YELLOW}${ENVIRONMENT}${NC}"
@@ -91,6 +107,17 @@ if [ -z "$AWS_ACCOUNT_ID" ] || [ "$AWS_ACCOUNT_ID" == "None" ]; then
 fi
 
 echo -e "${GREEN}✅ Using AWS Account: ${AWS_ACCOUNT_ID}${NC}"
+
+# Export SSO credentials as environment variables for CDK
+# CDK has issues with SSO profiles when stacks have explicit env.account set
+# This converts the SSO session to static credentials that CDK can use
+echo -e "${YELLOW}Exporting credentials for CDK...${NC}"
+eval "$(aws configure export-credentials --profile ${AWS_PROFILE} --format env 2>/dev/null)" || true
+if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+    echo -e "${GREEN}✅ Credentials exported for CDK${NC}"
+else
+    echo -e "${YELLOW}⚠️  Could not export credentials, CDK will use profile directly${NC}"
+fi
 echo ""
 
 # Function to check if command exists
@@ -421,11 +448,8 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${GREEN}✅ VPC SSM parameter already exists: ${EXISTING_VPC_ID}${NC}"
     fi
 
-    # Synthesize CloudFormation
-    echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
-    cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
-
-    echo ""
+    # NOTE: Removed explicit cdk synth - each cdk deploy runs synthesis internally
+    # This saves ~30-60 seconds per deployment
 
     # Remove bootstrapped SSM parameters before deploying the stacks that create them
     # via CloudFormation. CloudFormation's EarlyValidation::ResourceExistenceCheck rejects
@@ -468,7 +492,20 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
             # Phase 3: Data (creates DynamoDB tables and SSM params needed by later stacks)
             # Note: Assets is deployed after API Gateway Core (Phase 5a) because it imports API Gateway SSM params
             echo -e "${BLUE}Phase 3: Data${NC}"
-            if ! cdk deploy Data -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+
+            # Detect if CSPM or Assets have been deployed previously (re-deployment scenario)
+            # This allows Data stack to integrate with existing tables on subsequent deployments
+            DATA_CONTEXT_FLAGS="-c environment=${ENVIRONMENT}"
+            if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c cspm-deployed=true"
+                echo -e "${GREEN}  CSPM: detected - enabling resource-metadata integration${NC}"
+            fi
+            if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/assets/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c assets-deployed=true"
+                echo -e "${GREEN}  Assets: detected - enabling assets integration${NC}"
+            fi
+
+            if ! cdk deploy Data ${DATA_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 (Data) deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
@@ -576,11 +613,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                             DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c neptune-deployed=true"
                             echo -e "${GREEN}  Neptune: detected${NC}"
                         fi
-                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/resource-metadata/table-arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
                             DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c cspm-deployed=true"
                             echo -e "${GREEN}  CSPM: detected${NC}"
                         fi
-                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/assets/table-arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                        if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/assets/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
                             DATA_CONTEXT_FLAGS="${DATA_CONTEXT_FLAGS} -c assets-deployed=true"
                             echo -e "${GREEN}  Assets: detected${NC}"
                         fi
@@ -605,7 +642,15 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                 # Phase 8: Operations (creates Lambda functions needed by API Routes)
                                 echo -e "${BLUE}Phase 8: Operations${NC}"
                                 echo -e "${YELLOW}Note: Operations creates Lambda functions (ScanManagement, CatalogManagement, AwsAccountManagement) needed by API Routes${NC}"
-                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+
+                                # Detect if CSPM has been deployed for resource-metadata integration
+                                OPS_CONTEXT_FLAGS="-c environment=${ENVIRONMENT}"
+                                if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                                    OPS_CONTEXT_FLAGS="${OPS_CONTEXT_FLAGS} -c cspm-deployed=true"
+                                    echo -e "${GREEN}  CSPM: detected - enabling resource-metadata integration${NC}"
+                                fi
+
+                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
                                     echo -e "${RED}❌ Phase 8 deployment failed${NC}"
                                     DEPLOYMENT_SUCCESS=false
                                 else
@@ -619,14 +664,65 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     # Phase 8a: M365 (depends on Operations for scan-submit Lambda ARN)
                                     echo -e "${BLUE}Phase 8a: M365${NC}"
                                     echo -e "${YELLOW}Note: M365 creates Microsoft 365 integration and discovery Lambda functions${NC}"
-                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-M365 -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
-                                        echo -e "${YELLOW}⚠️  Phase 8a (M365) deployment failed — continuing without M365 integration${NC}"
+                                    M365_DEPLOYED=false
+                                    if cdk deploy HarborMind-${ENVIRONMENT}-M365 -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                        M365_DEPLOYED=true
                                     else
-                                        # Phase 8b: Re-deploy Operations to wire up M365 discover function
-                                        echo -e "${BLUE}Phase 8b: Re-deploy Operations (wire up M365 integration)${NC}"
-                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations -c environment=${ENVIRONMENT} -c m365-deployed=true --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
-                                            echo -e "${YELLOW}⚠️  Phase 8b (Operations re-deploy) failed — scheduled discovery may not handle M365${NC}"
+                                        echo -e "${YELLOW}⚠️  Phase 8a (M365) deployment failed — continuing without M365 integration${NC}"
+                                    fi
+
+                                    # Phase 8b: Re-deploy Operations to ensure all integrations are wired
+                                    # This ensures discovery-processor gets event source mapping for resource-metadata
+                                    # even if the initial deploy happened before CSPM was deployed
+                                    echo -e "${BLUE}Phase 8b: Re-deploy Operations (ensure all integrations wired)${NC}"
+
+                                    # Re-detect all optional stacks to build context flags
+                                    OPS_REDEPLOY_FLAGS="-c environment=${ENVIRONMENT}"
+                                    if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                                        OPS_REDEPLOY_FLAGS="${OPS_REDEPLOY_FLAGS} -c cspm-deployed=true"
+                                        echo -e "${GREEN}  CSPM: detected - enabling resource-metadata stream integration${NC}"
+                                    fi
+                                    if [ "$M365_DEPLOYED" = true ] || aws ssm get-parameter --name "/${ENVIRONMENT}/lambda/m365-discover/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
+                                        OPS_REDEPLOY_FLAGS="${OPS_REDEPLOY_FLAGS} -c m365-deployed=true"
+                                        echo -e "${GREEN}  M365: detected - enabling M365 discovery integration${NC}"
+                                    fi
+
+                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_REDEPLOY_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                        echo -e "${YELLOW}⚠️  Phase 8b (Operations re-deploy) failed — some integrations may not be fully wired${NC}"
+                                    fi
+
+                                    # Verify discovery-processor has event source mapping for resource-metadata
+                                    echo -e "${BLUE}Verifying discovery-processor event source mappings...${NC}"
+                                    DISCOVERY_PROCESSOR_NAME="harbormind-${ENVIRONMENT}-lambda-discovery-processor"
+                                    RESOURCE_METADATA_STREAM=$(aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/stream-arn" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+
+                                    if [ -n "$RESOURCE_METADATA_STREAM" ] && [ "$RESOURCE_METADATA_STREAM" != "None" ]; then
+                                        # Check if event source mapping exists
+                                        MAPPING_EXISTS=$(aws lambda list-event-source-mappings --function-name ${DISCOVERY_PROCESSOR_NAME} --event-source-arn ${RESOURCE_METADATA_STREAM} --query "EventSourceMappings[0].UUID" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
+
+                                        if [ -z "$MAPPING_EXISTS" ] || [ "$MAPPING_EXISTS" == "None" ]; then
+                                            echo -e "${YELLOW}⚠️  Event source mapping missing for discovery-processor → resource-metadata${NC}"
+                                            echo -e "${YELLOW}   Creating event source mapping manually...${NC}"
+                                            aws lambda create-event-source-mapping \
+                                                --function-name ${DISCOVERY_PROCESSOR_NAME} \
+                                                --event-source-arn ${RESOURCE_METADATA_STREAM} \
+                                                --starting-position TRIM_HORIZON \
+                                                --batch-size 25 \
+                                                --maximum-retry-attempts 3 \
+                                                --bisect-batch-on-function-error \
+                                                --function-response-types ReportBatchItemFailures \
+                                                --profile ${AWS_PROFILE} \
+                                                --region ${AWS_REGION} 2>/dev/null
+                                            if [ $? -eq 0 ]; then
+                                                echo -e "${GREEN}  ✅ Event source mapping created for discovery-processor${NC}"
+                                            else
+                                                echo -e "${RED}  ❌ Failed to create event source mapping - check IAM permissions${NC}"
+                                            fi
+                                        else
+                                            echo -e "${GREEN}  ✅ Event source mapping exists for discovery-processor → resource-metadata${NC}"
                                         fi
+                                    else
+                                        echo -e "${YELLOW}  ⚠️  resource-metadata stream not found - CSPM may not be deployed${NC}"
                                     fi
 
                                     # Phase 9: API Routes (depends on Operations for Lambda functions)
@@ -699,8 +795,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                                 echo -e "${RED}❌ Phase 11 deployment failed${NC}"
                                                 DEPLOYMENT_SUCCESS=false
                                             else
-                                                # Phase 12: CICD (optional - only if CodeConnection is available)
-                                                if [ -n "${CODE_CONNECTION_ID}" ]; then
+                                                # Phase 12: CICD (optional - only if CodeConnection is available and not dev2)
+                                                # dev2 uses shared GitHub Actions infrastructure from dev
+                                                if [ "${ENVIRONMENT}" = "dev2" ]; then
+                                                    echo -e "${YELLOW}⚠️  Skipping CICD stack deployment (dev2 uses shared infrastructure from dev)${NC}"
+                                                elif [ -n "${CODE_CONNECTION_ID}" ]; then
                                                     echo -e "${BLUE}Phase 12: CICD${NC}"
                                                     echo -e "${YELLOW}Note: CICD creates CodeBuild projects for automated deployments${NC}"
                                                     if ! cdk deploy HarborMind-${ENVIRONMENT}-CICD -c environment=${ENVIRONMENT} -c code-connection-id=${CODE_CONNECTION_ID} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
