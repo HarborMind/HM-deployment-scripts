@@ -795,8 +795,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                                 echo -e "${RED}❌ Phase 11 deployment failed${NC}"
                                                 DEPLOYMENT_SUCCESS=false
                                             else
-                                                # Phase 12: CICD (optional - only if CodeConnection is available)
-                                                if [ -n "${CODE_CONNECTION_ID}" ]; then
+                                                # Phase 12: CICD (optional - only if CodeConnection is available and not dev2)
+                                                # dev2 uses shared GitHub Actions infrastructure from dev
+                                                if [ "${ENVIRONMENT}" = "dev2" ]; then
+                                                    echo -e "${YELLOW}⚠️  Skipping CICD stack deployment (dev2 uses shared infrastructure from dev)${NC}"
+                                                elif [ -n "${CODE_CONNECTION_ID}" ]; then
                                                     echo -e "${BLUE}Phase 12: CICD${NC}"
                                                     echo -e "${YELLOW}Note: CICD creates CodeBuild projects for automated deployments${NC}"
                                                     if ! cdk deploy HarborMind-${ENVIRONMENT}-CICD -c environment=${ENVIRONMENT} -c code-connection-id=${CODE_CONNECTION_ID} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
