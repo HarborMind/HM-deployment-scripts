@@ -48,7 +48,7 @@ const CSPM_POLICY_NAMES = [
 
 // Paths
 const SCRIPT_DIR = __dirname;
-const FRONTEND_DIR = path.join(SCRIPT_DIR, '../SaaS-frontend');
+const FRONTEND_DIR = path.join(SCRIPT_DIR, '../HarborMind-SaaS/SaaS-frontend');
 const TEMPLATE_PATH = path.join(FRONTEND_DIR, 'public/templates/AWS-ECS-Fleet-Template-Dynamic.yaml');
 const OUTPUT_PATH = path.join(FRONTEND_DIR, 'public/scanner-permissions.json');
 

@@ -115,8 +115,12 @@ echo -e "${YELLOW}Exporting credentials for CDK...${NC}"
 eval "$(aws configure export-credentials --profile ${AWS_PROFILE} --format env 2>/dev/null)" || true
 if [ -n "$AWS_ACCESS_KEY_ID" ]; then
     echo -e "${GREEN}✅ Credentials exported for CDK${NC}"
+    # When credentials are exported as env vars, don't pass --profile to CDK
+    # This avoids CDK trying to use the SSO profile which can fail
+    CDK_PROFILE_ARG=""
 else
     echo -e "${YELLOW}⚠️  Could not export credentials, CDK will use profile directly${NC}"
+    CDK_PROFILE_ARG="--profile ${AWS_PROFILE}"
 fi
 echo ""
 
@@ -189,21 +193,21 @@ deploy_cdk() {
     echo -e "${YELLOW}Checking CDK bootstrap...${NC}"
     if ! aws cloudformation describe-stacks --stack-name CDKToolkit --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
         echo -e "${YELLOW}Bootstrapping CDK...${NC}"
-        cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} --profile ${AWS_PROFILE}
+        cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} ${CDK_PROFILE_ARG}
     fi
-    
+
     # Synthesize CloudFormation
     echo -e "${YELLOW}Synthesizing CloudFormation templates...${NC}"
-    cdk synth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE}
+    cdk synth -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG}
     
     # Deploy
     echo -e "${YELLOW}Deploying stacks...${NC}"
     if [ -n "$stack_name" ]; then
         # Deploy specific stack
-        cdk deploy "$stack_name" -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}
+        cdk deploy "$stack_name" -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}
     else
         # Deploy all stacks
-        cdk deploy --all -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}
+        cdk deploy --all -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}
     fi
     
     if [ $? -eq 0 ]; then
@@ -301,7 +305,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
     echo -e "${YELLOW}Checking CDK bootstrap...${NC}"
     if ! aws cloudformation describe-stacks --stack-name CDKToolkit --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
         echo -e "${YELLOW}Bootstrapping CDK...${NC}"
-        cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} --profile ${AWS_PROFILE}
+        cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION} ${CDK_PROFILE_ARG}
     fi
 
     # Bootstrap shared layer SSM parameter (required for cdk synth - valueFromLookup)
@@ -466,13 +470,13 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
     # Phase 1: DNS
     echo -e "${BLUE}Phase 1: DNS${NC}"
-    if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+    if ! cdk deploy HarborMind-${ENVIRONMENT}-DNS -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
         echo -e "${RED}❌ Phase 1 deployment failed${NC}"
         DEPLOYMENT_SUCCESS=false
     else
         # Phase 2: Foundation
         echo -e "${BLUE}Phase 2: Foundation${NC}"
-        if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+        if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
             echo -e "${RED}❌ Phase 2 deployment failed${NC}"
             DEPLOYMENT_SUCCESS=false
         else
@@ -505,14 +509,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 echo -e "${GREEN}  Assets: detected - enabling assets integration${NC}"
             fi
 
-            if ! cdk deploy Data ${DATA_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+            if ! cdk deploy Data ${DATA_CONTEXT_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                 echo -e "${RED}❌ Phase 3 (Data) deployment failed${NC}"
                 DEPLOYMENT_SUCCESS=false
             else
                 # Phase 3-Neptune: Deploy independently so failure doesn't block the pipeline
                 echo -e "${BLUE}Phase 3: Neptune${NC}"
                 echo -e "${YELLOW}Note: Neptune creates graph database for attack path analysis${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Neptune -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                     echo -e "${YELLOW}⚠️  Neptune deployment failed — continuing with remaining stacks${NC}"
                 fi
                 # Phase 3a: Re-deploy Foundation so Cognito Lambda triggers pick up real
@@ -528,7 +532,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 npx cdk context --reset "ssm:account=${AWS_ACCOUNT_ID}:parameterName=/${ENVIRONMENT}/dynamodb/tables/auditlogs/name:region=${AWS_REGION}" --force 2>/dev/null || true
                 echo -e "${GREEN}✅ CDK context cache cleared for DynamoDB table SSM params${NC}"
 
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Foundation -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 3a (Foundation re-deploy) failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
@@ -536,14 +540,14 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 # Phase 3b: CSPM (depends on Data for scans table stream ARN in SSM)
                 echo -e "${BLUE}Phase 3b: CSPM${NC}"
                 echo -e "${YELLOW}Note: CSPM creates cspm-findings table and uses scans table stream for check triggering${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-CSPM -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-CSPM -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 3b (CSPM) deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
                 # Phase 3c: Activity (depends on Data for activity monitoring tables)
                 echo -e "${BLUE}Phase 3c: Activity${NC}"
                 echo -e "${YELLOW}Note: Activity creates activity monitoring infrastructure${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-Activity -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-Activity -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                     echo -e "${YELLOW}⚠️  Phase 3c (Activity) deployment failed — continuing without activity monitoring${NC}"
                 fi
                 # NOTE: Shared layer is managed by CDK Foundation stack with Docker bundling
@@ -555,7 +559,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                 # Phase 4: Lambda Functions and SearchData
                 echo -e "${BLUE}Phase 4: Lambda Functions and SearchData${NC}"
                 echo -e "${YELLOW}Note: Lambda Functions exports function ARNs to SSM, SearchData is isolated for independent lifecycle management${NC}"
-                if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions HarborMind-${ENVIRONMENT}-SearchData -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                if ! cdk deploy HarborMind-${ENVIRONMENT}-LambdaFunctions HarborMind-${ENVIRONMENT}-SearchData -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                     echo -e "${RED}❌ Phase 4 deployment failed${NC}"
                     DEPLOYMENT_SUCCESS=false
                 else
@@ -570,7 +574,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                         echo -e "${GREEN}  WAF: detected${NC}"
                     fi
 
-                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore ${API_GW_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore ${API_GW_CONTEXT_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                         echo -e "${RED}❌ Phase 5 deployment failed${NC}"
                         DEPLOYMENT_SUCCESS=false
                     else
@@ -597,7 +601,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                         # Phase 5a: Assets (depends on API Gateway SSM params from Phase 5 and Data SSM params from Phase 3)
                         echo -e "${BLUE}Phase 5a: Assets${NC}"
                         echo -e "${YELLOW}Note: Assets creates assets table and adds API Gateway routes for asset management${NC}"
-                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Assets -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                        if ! cdk deploy HarborMind-${ENVIRONMENT}-Assets -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                             echo -e "${RED}❌ Phase 5a (Assets) deployment failed${NC}"
                             DEPLOYMENT_SUCCESS=false
                         else
@@ -622,20 +626,20 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                             echo -e "${GREEN}  Assets: detected${NC}"
                         fi
 
-                        if ! cdk deploy Data ${DATA_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                        if ! cdk deploy Data ${DATA_CONTEXT_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                             echo -e "${YELLOW}⚠️  Phase 5b (Data re-deploy) failed — stream processors may not be fully wired${NC}"
                         fi
 
                         # Phase 6: SecurityAuth
                         echo -e "${BLUE}Phase 6: SecurityAuth${NC}"
-                        if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityAuth -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                        if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityAuth -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                             echo -e "${RED}❌ Phase 6 deployment failed${NC}"
                             DEPLOYMENT_SUCCESS=false
                         else
                             # Phase 7: Analytics
                             echo -e "${BLUE}Phase 7: Analytics${NC}"
                             echo -e "${YELLOW}Note: Analytics imports API Gateway and SearchData parameters from SSM${NC}"
-                            if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                            if ! cdk deploy HarborMind-${ENVIRONMENT}-Analytics -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                 echo -e "${RED}❌ Phase 7 deployment failed${NC}"
                                 DEPLOYMENT_SUCCESS=false
                             else
@@ -650,7 +654,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     echo -e "${GREEN}  CSPM: detected - enabling resource-metadata integration${NC}"
                                 fi
 
-                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_CONTEXT_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_CONTEXT_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                     echo -e "${RED}❌ Phase 8 deployment failed${NC}"
                                     DEPLOYMENT_SUCCESS=false
                                 else
@@ -665,7 +669,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     echo -e "${BLUE}Phase 8a: M365${NC}"
                                     echo -e "${YELLOW}Note: M365 creates Microsoft 365 integration and discovery Lambda functions${NC}"
                                     M365_DEPLOYED=false
-                                    if cdk deploy HarborMind-${ENVIRONMENT}-M365 -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                    if cdk deploy HarborMind-${ENVIRONMENT}-M365 -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                         M365_DEPLOYED=true
                                     else
                                         echo -e "${YELLOW}⚠️  Phase 8a (M365) deployment failed — continuing without M365 integration${NC}"
@@ -687,7 +691,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                         echo -e "${GREEN}  M365: detected - enabling M365 discovery integration${NC}"
                                     fi
 
-                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_REDEPLOY_FLAGS} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_REDEPLOY_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                         echo -e "${YELLOW}⚠️  Phase 8b (Operations re-deploy) failed — some integrations may not be fully wired${NC}"
                                     fi
 
@@ -729,7 +733,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     echo -e "${BLUE}Phase 9: API Routes${NC}"
                                     echo -e "${YELLOW}Note: Deploying route stacks for Orchestrators, Data, Config, and Search${NC}"
                                     echo -e "${YELLOW}      Data/Orchestrators depend on Operations for scan/catalog Lambda functions${NC}"
-                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiRoutes-Orchestrators HarborMind-${ENVIRONMENT}-ApiRoutes-Data HarborMind-${ENVIRONMENT}-ApiRoutes-Config HarborMind-${ENVIRONMENT}-ApiRoutes-Search -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiRoutes-Orchestrators HarborMind-${ENVIRONMENT}-ApiRoutes-Data HarborMind-${ENVIRONMENT}-ApiRoutes-Config HarborMind-${ENVIRONMENT}-ApiRoutes-Search -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                         echo -e "${RED}❌ Phase 9 deployment failed${NC}"
                                         DEPLOYMENT_SUCCESS=false
                                     else
@@ -779,19 +783,19 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
                                         # Phase 10: SecurityInfrastructure
                                         echo -e "${BLUE}Phase 10: SecurityInfrastructure${NC}"
-                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                        if ! cdk deploy HarborMind-${ENVIRONMENT}-SecurityInfrastructure -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                             echo -e "${RED}❌ Phase 10 deployment failed${NC}"
                                             DEPLOYMENT_SUCCESS=false
                                         else
                                             # Phase 10a: Re-deploy API Gateway Core to associate WAF
                                             echo -e "${BLUE}Phase 10a: Re-deploy API Gateway Core (associate WAF)${NC}"
-                                            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore -c environment=${ENVIRONMENT} -c waf-deployed=true --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                            if ! cdk deploy HarborMind-${ENVIRONMENT}-ApiGatewayCore -c environment=${ENVIRONMENT} -c waf-deployed=true ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                                 echo -e "${YELLOW}⚠️  Phase 10a (API Gateway WAF association) failed${NC}"
                                             fi
 
                                             # Phase 11: Frontend
                                             echo -e "${BLUE}Phase 11: Frontend${NC}"
-                                            if ! cdk deploy HarborMind-${ENVIRONMENT}-Frontend -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                            if ! cdk deploy HarborMind-${ENVIRONMENT}-Frontend -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                                 echo -e "${RED}❌ Phase 11 deployment failed${NC}"
                                                 DEPLOYMENT_SUCCESS=false
                                             else
@@ -802,7 +806,7 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                                 elif [ -n "${CODE_CONNECTION_ID}" ]; then
                                                     echo -e "${BLUE}Phase 12: CICD${NC}"
                                                     echo -e "${YELLOW}Note: CICD creates CodeBuild projects for automated deployments${NC}"
-                                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-CICD -c environment=${ENVIRONMENT} -c code-connection-id=${CODE_CONNECTION_ID} --profile ${AWS_PROFILE} ${CDK_OPTIONS}; then
+                                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-CICD -c environment=${ENVIRONMENT} -c code-connection-id=${CODE_CONNECTION_ID} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
                                                         echo -e "${YELLOW}⚠️  Phase 12 (CICD) deployment failed — continuing without CI/CD infrastructure${NC}"
                                                     else
                                                         echo -e "${GREEN}✅ CICD stack deployed successfully${NC}"
@@ -850,14 +854,14 @@ if [ "$DEPLOYMENT_SUCCESS" = true ]; then
     
     if [[ "$DEPLOY_TYPE" == "platform" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${YELLOW}Platform Admin Stacks:${NC}"
-        cd "$PLATFORM_CDK_DIR" && cdk ls -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} 2>/dev/null | while read stack; do
+        cd "$PLATFORM_CDK_DIR" && cdk ls -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} 2>/dev/null | while read stack; do
             echo -e "  - ${GREEN}${stack}${NC}"
         done
     fi
-    
+
     if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
         echo -e "${YELLOW}Customer App Stacks:${NC}"
-        cd "$CUSTOMER_CDK_DIR" && cdk ls -c environment=${ENVIRONMENT} --profile ${AWS_PROFILE} 2>/dev/null | while read stack; do
+        cd "$CUSTOMER_CDK_DIR" && cdk ls -c environment=${ENVIRONMENT} ${CDK_PROFILE_ARG} 2>/dev/null | while read stack; do
             echo -e "  - ${GREEN}${stack}${NC}"
         done
     fi

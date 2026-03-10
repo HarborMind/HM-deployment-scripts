@@ -50,10 +50,10 @@ DEPLOY_VERSION="v$(date +%s)"
 # Script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="${SCRIPT_DIR}/.."
-FRONTEND_APP_DIR="${PROJECT_ROOT}/SaaS-frontend"
-FRONTEND_ADMIN_DIR="${PROJECT_ROOT}/../HarborMind-Platform-Admin/HM-platform-admin-frontend"
-CDK_DIR="${PROJECT_ROOT}/SaaS-infrastructure/cdk"
-ADMIN_CDK_DIR="${PROJECT_ROOT}/../HarborMind-Platform-Admin/HM-platform-admin-infrastructure"
+FRONTEND_APP_DIR="${PROJECT_ROOT}/HarborMind-SaaS/SaaS-frontend"
+FRONTEND_ADMIN_DIR="${PROJECT_ROOT}/HarborMind-Platform-Admin/HM-platform-admin-frontend"
+CDK_DIR="${PROJECT_ROOT}/HarborMind-SaaS/SaaS-infrastructure/cdk"
+ADMIN_CDK_DIR="${PROJECT_ROOT}/HarborMind-Platform-Admin/HM-platform-admin-infrastructure"
 
 echo -e "${GREEN}🚀 HarborMind Frontend Deployment Script (Split Structure)${NC}"
 echo -e "Environment: ${YELLOW}${ENVIRONMENT}${NC}"
@@ -1157,7 +1157,7 @@ RULES_BUCKET=$(aws ssm get-parameter \
     --region ${AWS_REGION} 2>/dev/null || echo "")
 
 if [ -n "$RULES_BUCKET" ]; then
-    MASTER_PATTERNS_DIR="${PROJECT_ROOT}/SaaS-backend/api/lambdas/classification-rules/master_patterns"
+    MASTER_PATTERNS_DIR="${PROJECT_ROOT}/HarborMind-SaaS/SaaS-backend/api/lambdas/classification-rules/master_patterns"
 
     if [ -d "$MASTER_PATTERNS_DIR" ]; then
         # Upload all pattern files to S3 master directory
@@ -1198,7 +1198,7 @@ CSPM_RULES_BUCKET=$(aws ssm get-parameter \
     --region ${AWS_REGION} 2>/dev/null || echo "")
 
 if [ -n "$CSPM_RULES_BUCKET" ]; then
-    CSPM_RULES_DIR="${PROJECT_ROOT}/SaaS-backend/api/lambdas/cspm-rules/rules"
+    CSPM_RULES_DIR="${PROJECT_ROOT}/HarborMind-SaaS/SaaS-backend/api/lambdas/cspm-rules/rules"
 
     if [ -d "$CSPM_RULES_DIR" ]; then
         for provider_dir in ${CSPM_RULES_DIR}/*/; do
