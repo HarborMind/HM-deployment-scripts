@@ -680,6 +680,11 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                     # even if the initial deploy happened before CSPM was deployed
                                     echo -e "${BLUE}Phase 8b: Re-deploy Operations (ensure all integrations wired)${NC}"
 
+                                    # Clear cached cdk.out to force fresh synthesis with new context flags
+                                    # This ensures cspm-deployed=true is picked up even if Operations was
+                                    # previously synthesized without it
+                                    rm -rf cdk.out/HarborMind-${ENVIRONMENT}-Operations.* 2>/dev/null || true
+
                                     # Re-detect all optional stacks to build context flags
                                     OPS_REDEPLOY_FLAGS="-c environment=${ENVIRONMENT}"
                                     if aws ssm get-parameter --name "/${ENVIRONMENT}/dynamodb/tables/resource-metadata/arn" --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
@@ -691,7 +696,8 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                         echo -e "${GREEN}  M365: detected - enabling M365 discovery integration${NC}"
                                     fi
 
-                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_REDEPLOY_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS}; then
+                                    # Use --force to ensure deployment even if CDK thinks nothing changed
+                                    if ! cdk deploy HarborMind-${ENVIRONMENT}-Operations ${OPS_REDEPLOY_FLAGS} ${CDK_PROFILE_ARG} ${CDK_OPTIONS} --force; then
                                         echo -e "${YELLOW}⚠️  Phase 8b (Operations re-deploy) failed — some integrations may not be fully wired${NC}"
                                     fi
 
@@ -706,7 +712,33 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
 
                                         if [ -z "$MAPPING_EXISTS" ] || [ "$MAPPING_EXISTS" == "None" ]; then
                                             echo -e "${YELLOW}⚠️  Event source mapping missing for discovery-processor → resource-metadata${NC}"
-                                            echo -e "${YELLOW}   Creating event source mapping manually...${NC}"
+
+                                            # First, add IAM permissions for DynamoDB stream access
+                                            echo -e "${YELLOW}   Adding IAM permissions for stream access...${NC}"
+                                            LAMBDA_ROLE_NAME=$(aws lambda get-function-configuration --function-name ${DISCOVERY_PROCESSOR_NAME} --query 'Role' --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null | sed 's|.*/||')
+                                            if [ -n "$LAMBDA_ROLE_NAME" ] && [ "$LAMBDA_ROLE_NAME" != "None" ]; then
+                                                aws iam put-role-policy \
+                                                    --role-name "${LAMBDA_ROLE_NAME}" \
+                                                    --policy-name "ResourceMetadataStreamAccess" \
+                                                    --policy-document "{
+                                                        \"Version\": \"2012-10-17\",
+                                                        \"Statement\": [{
+                                                            \"Effect\": \"Allow\",
+                                                            \"Action\": [
+                                                                \"dynamodb:DescribeStream\",
+                                                                \"dynamodb:GetRecords\",
+                                                                \"dynamodb:GetShardIterator\",
+                                                                \"dynamodb:ListStreams\"
+                                                            ],
+                                                            \"Resource\": \"arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/resource-metadata/stream/*\"
+                                                        }]
+                                                    }" \
+                                                    --profile ${AWS_PROFILE} \
+                                                    --region ${AWS_REGION} 2>/dev/null
+                                                echo -e "${GREEN}  ✅ IAM permissions added${NC}"
+                                            fi
+
+                                            echo -e "${YELLOW}   Creating event source mapping...${NC}"
                                             aws lambda create-event-source-mapping \
                                                 --function-name ${DISCOVERY_PROCESSOR_NAME} \
                                                 --event-source-arn ${RESOURCE_METADATA_STREAM} \
