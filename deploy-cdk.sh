@@ -301,6 +301,15 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
     echo -e "${YELLOW}Building TypeScript...${NC}"
     npm run build
 
+    # Clear stale Lambda layer cache from CDK context
+    # This ensures Lambdas always use the latest layer versions from SSM
+    echo -e "${BLUE}Clearing cached Lambda layer SSM lookups from cdk.context.json...${NC}"
+    if [ -f cdk.context.json ]; then
+        jq 'with_entries(select(.key | test("lambda/layers") | not))' cdk.context.json > cdk.context.json.tmp
+        mv cdk.context.json.tmp cdk.context.json
+        echo -e "${GREEN}✅ Cleared stale layer cache entries${NC}"
+    fi
+
     # Bootstrap CDK if needed
     echo -e "${YELLOW}Checking CDK bootstrap...${NC}"
     if ! aws cloudformation describe-stacks --stack-name CDKToolkit --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
