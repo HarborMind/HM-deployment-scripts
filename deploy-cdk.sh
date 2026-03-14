@@ -793,32 +793,85 @@ if [[ "$DEPLOY_TYPE" == "customer" || "$DEPLOY_TYPE" == "both" ]]; then
                                             echo -e "${YELLOW}⚠️  Could not find REST API ID, skipping deployment${NC}"
                                         fi
 
-                                        # Update Lambda functions to use the CDK-managed shared layer
+                                        # Update Lambda functions that use the shared layer (tag-based discovery)
                                         # Layer ARN is stored by Foundation stack at: /${ENVIRONMENT}/lambda/layers/shared/arn
-                                        echo -e "${BLUE}Updating Lambda functions with CDK-managed shared layer...${NC}"
-                                        LAYER_ARN=$(aws ssm get-parameter --name "/${ENVIRONMENT}/lambda/layers/shared/arn" --query "Parameter.Value" --output text --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
-                                        if [ -n "$LAYER_ARN" ] && [ "$LAYER_ARN" != "None" ]; then
-                                            LAYER_VERSION=$(echo "$LAYER_ARN" | grep -oE '[0-9]+$')
+                                        # Functions with SharedLayer=true tag are discovered and updated
+                                        echo -e "${BLUE}Updating Lambda functions with shared layer...${NC}"
 
-                                            # List of Lambda functions that use the shared layer but aren't in CDK stacks
-                                            # that already reference the layer (e.g., functions in Data/Operations stacks)
-                                            LAMBDA_FUNCTIONS=(
-                                                "graph-api"
-                                                "relationship-builder"
-                                            )
+                                        LAYER_ARN=$(aws ssm get-parameter --name "/${ENVIRONMENT}/lambda/layers/shared/arn" \
+                                            --query "Parameter.Value" --output text \
+                                            --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || echo "")
 
-                                            for func in "${LAMBDA_FUNCTIONS[@]}"; do
-                                                if aws lambda get-function --function-name ${func} --profile ${AWS_PROFILE} --region ${AWS_REGION} &>/dev/null; then
-                                                    aws lambda update-function-configuration \
-                                                        --function-name ${func} \
-                                                        --layers ${LAYER_ARN} \
-                                                        --profile ${AWS_PROFILE} \
-                                                        --region ${AWS_REGION} >/dev/null 2>&1
-                                                    echo -e "${GREEN}  ✅ Updated ${func} to layer v${LAYER_VERSION}${NC}"
-                                                fi
-                                            done
+                                        if [ -z "$LAYER_ARN" ] || [ "$LAYER_ARN" = "None" ]; then
+                                            echo -e "${RED}ERROR: Could not find shared layer ARN in SSM${NC}"
+                                            exit 1
                                         else
-                                            echo -e "${YELLOW}⚠️  Could not find CDK-managed shared layer ARN, skipping Lambda updates${NC}"
+                                            LAYER_VERSION=$(echo "$LAYER_ARN" | grep -oE '[0-9]+$')
+                                            echo -e "  Layer ARN: ${LAYER_ARN}"
+                                            echo -e "  Layer Version: ${LAYER_VERSION}"
+
+                                            # Derive layer name pattern from ARN (e.g., "harbormind-dev-layer-shared")
+                                            LAYER_NAME_PATTERN=$(echo "$LAYER_ARN" | sed 's/.*:layer:\([^:]*\):.*/\1/')
+                                            echo -e "  Layer name pattern: ${LAYER_NAME_PATTERN}"
+
+                                            # Query functions by SharedLayer tag (fast discovery)
+                                            FUNCTIONS=$(aws resourcegroupstaggingapi get-resources \
+                                                --tag-filters Key=SharedLayer,Values=true \
+                                                --resource-type-filters lambda:function \
+                                                --query "ResourceTagMappingList[].ResourceARN" \
+                                                --output text \
+                                                --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null | tr '\t' '\n')
+
+                                            if [ -z "$FUNCTIONS" ]; then
+                                                echo -e "${YELLOW}⚠️  No functions found with SharedLayer tag${NC}"
+                                            else
+                                                UPDATED=0
+                                                FAILED=0
+                                                TOTAL=$(echo "$FUNCTIONS" | wc -l | tr -d ' ')
+
+                                                echo -e "  Found ${TOTAL} functions with SharedLayer tag"
+
+                                                for func_arn in $FUNCTIONS; do
+                                                    func_name=$(echo "$func_arn" | sed 's/.*:function://')
+
+                                                    # Wait for function to be ready (handles race condition after CDK deploy)
+                                                    echo -e "  Waiting for ${func_name} to be ready..."
+                                                    aws lambda wait function-updated --function-name "$func_name" \
+                                                        --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null || true
+
+                                                    # Get current layers to preserve non-shared layers
+                                                    CURRENT_LAYERS=$(aws lambda get-function-configuration --function-name "$func_name" \
+                                                        --query "Layers[].Arn" --output text \
+                                                        --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>/dev/null | tr '\t' '\n')
+
+                                                    # Build new layer list: keep non-shared layers, replace shared layer with new version
+                                                    NEW_LAYERS="$LAYER_ARN"
+                                                    for layer in $CURRENT_LAYERS; do
+                                                        if ! echo "$layer" | grep -q "$LAYER_NAME_PATTERN"; then
+                                                            NEW_LAYERS="$NEW_LAYERS $layer"
+                                                        fi
+                                                    done
+
+                                                    # Update function configuration and capture errors
+                                                    if output=$(aws lambda update-function-configuration \
+                                                        --function-name "$func_name" \
+                                                        --layers $NEW_LAYERS \
+                                                        --profile ${AWS_PROFILE} --region ${AWS_REGION} 2>&1); then
+                                                        echo -e "${GREEN}  ✅ ${func_name} → v${LAYER_VERSION}${NC}"
+                                                        ((UPDATED++))
+                                                    else
+                                                        echo -e "${RED}  ❌ ${func_name} failed: ${output}${NC}"
+                                                        ((FAILED++))
+                                                    fi
+                                                done
+
+                                                echo -e "\n${BLUE}Layer update complete: ${UPDATED} updated, ${FAILED} failed${NC}"
+
+                                                if [ $FAILED -gt 0 ]; then
+                                                    echo -e "${RED}ERROR: ${FAILED} functions failed to update${NC}"
+                                                    exit 1
+                                                fi
+                                            fi
                                         fi
                                         echo ""
 
